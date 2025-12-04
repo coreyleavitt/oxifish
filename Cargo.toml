@@ -17,6 +17,9 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 twofish = "0.7"
 cbc = "0.1"
+ctr = "0.9"
+cfb-mode = "0.8"
+ofb = "0.6"
 cipher = "0.4"
 zeroize = { version = "1.7", features = ["derive"] }
 
