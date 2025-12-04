@@ -1,7 +1,6 @@
 """Tests for oxifish Twofish implementation."""
 
 import pytest
-
 from oxifish import (
     BLOCK_SIZE,
     Padding,
@@ -103,9 +102,7 @@ class TestTwofishECB:
 
     def test_vector_256bit_key(self) -> None:
         """Test against official 256-bit key test vector."""
-        key = bytes.fromhex(
-            "0123456789ABCDEFFEDCBA987654321000112233445566778899AABBCCDDEEFF"
-        )
+        key = bytes.fromhex("0123456789ABCDEFFEDCBA987654321000112233445566778899AABBCCDDEEFF")
         plaintext = bytes.fromhex("00000000000000000000000000000000")
         expected = bytes.fromhex("37527BE0052334B89F0CFCCAE87CFA20")
 
@@ -314,8 +311,8 @@ class TestCBCPaddingOptions:
         iv = b"\x00" * 16
 
         test_cases = [
-            (0, 16),   # Empty -> 16 bytes padding
-            (1, 16),   # 1 byte -> 15 bytes padding
+            (0, 16),  # Empty -> 16 bytes padding
+            (1, 16),  # 1 byte -> 15 bytes padding
             (15, 16),  # 15 bytes -> 1 byte padding
             (16, 32),  # 16 bytes -> 16 bytes padding (full block)
             (17, 32),  # 17 bytes -> 15 bytes padding

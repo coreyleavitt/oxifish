@@ -81,9 +81,7 @@ class TwofishCBC:
     with a unique IV for each encryption operation.
     """
 
-    def __init__(
-        self, key: bytes, iv: bytes, padding: Padding = Padding.Pkcs7
-    ) -> None:
+    def __init__(self, key: bytes, iv: bytes, padding: Padding = Padding.Pkcs7) -> None:
         """Create a new TwofishCBC cipher.
 
         Args:
