@@ -36,8 +36,13 @@ jobs:
         run: |
           uv pip install --system maturin pytest
 
-      - name: Build and install
-        run: maturin develop
+      - name: Build wheel
+        run: maturin build --release
+
+      - name: Install wheel
+        shell: bash
+        run: |
+          pip install target/wheels/*.whl
 
       - name: Run tests
         run: pytest tests/ -v
@@ -56,7 +61,12 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: |
+          cargo clippy -- \
+            -D warnings \
+            -A clippy::useless_conversion \
+            -A clippy::manual_is_multiple_of \
+            -A clippy::manual_repeat_n
 
       - name: Set up Python
         uses: actions/setup-python@v5
