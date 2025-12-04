@@ -4,7 +4,7 @@
 //! wrapping the RustCrypto `twofish` crate. It supports ECB, CBC, CTR, CFB, and OFB modes.
 
 use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit, StreamCipher};
-use cipher::{AsyncStreamCipher, BlockDecrypt, BlockEncrypt, InnerIvInit, StreamCipherCore};
+use cipher::{AsyncStreamCipher, BlockDecrypt, BlockEncrypt, InnerIvInit};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -317,7 +317,7 @@ impl TwofishCFB {
     /// Returns:
     ///     Ciphertext (same length as input)
     fn encrypt<'py>(&self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        let mut cipher = TwofishCfbEnc::new_from_slices(&self.key, &self.iv)
+        let cipher = TwofishCfbEnc::new_from_slices(&self.key, &self.iv)
             .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
         let mut buffer = data.to_vec();
         cipher.encrypt(&mut buffer);
@@ -332,7 +332,7 @@ impl TwofishCFB {
     /// Returns:
     ///     Plaintext (same length as input)
     fn decrypt<'py>(&self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        let mut cipher = TwofishCfbDec::new_from_slices(&self.key, &self.iv)
+        let cipher = TwofishCfbDec::new_from_slices(&self.key, &self.iv)
             .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
         let mut buffer = data.to_vec();
         cipher.decrypt(&mut buffer);
