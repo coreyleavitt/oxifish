@@ -4,6 +4,7 @@
 //! wrapping the RustCrypto `twofish` crate. It supports ECB and CBC modes.
 
 use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit};
+use cipher::{BlockEncrypt, BlockDecrypt};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -136,11 +137,13 @@ impl TwofishCBC {
     /// Returns:
     ///     Ciphertext (padded to block size multiple)
     fn encrypt<'py>(&self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        let padded = pkcs7_pad(data);
+        let mut buffer = pkcs7_pad(data);
+        let len = buffer.len();
         let encryptor = TwofishCbcEnc::new_from_slices(&self.key, &self.iv)
             .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
-        let ciphertext = encryptor.encrypt_padded_vec_mut::<cipher::block_padding::NoPadding>(&padded);
-        Ok(PyBytes::new_bound(py, &ciphertext))
+        encryptor.encrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut buffer, len)
+            .map_err(|_| PyRuntimeError::new_err("Encryption failed"))?;
+        Ok(PyBytes::new_bound(py, &buffer))
     }
 
     /// Decrypt data and remove PKCS7 padding.

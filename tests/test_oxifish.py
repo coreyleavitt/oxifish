@@ -36,7 +36,7 @@ class TestTwofishECB:
     def test_encrypt_decrypt_roundtrip(self) -> None:
         """Test that encrypt/decrypt is reversible."""
         key = b"0123456789abcdef"
-        plaintext = b"Hello, World!!!"  # Exactly 16 bytes
+        plaintext = b"Hello, World!!!!"  # Exactly 16 bytes
         assert len(plaintext) == 16
 
         cipher = TwofishECB(key)
