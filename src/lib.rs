@@ -86,7 +86,7 @@ impl TwofishECB {
         let mut output = [0u8; BLOCK_SIZE];
         output.copy_from_slice(block);
         self.cipher.encrypt_block((&mut output).into());
-        Ok(PyBytes::new_bound(py, &output))
+        Ok(PyBytes::new(py, &output))
     }
 
     /// Decrypt a single 16-byte block.
@@ -110,7 +110,7 @@ impl TwofishECB {
         let mut output = [0u8; BLOCK_SIZE];
         output.copy_from_slice(block);
         self.cipher.decrypt_block((&mut output).into());
-        Ok(PyBytes::new_bound(py, &output))
+        Ok(PyBytes::new(py, &output))
     }
 }
 
@@ -166,7 +166,7 @@ impl TwofishCBC {
         encryptor
             .encrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut buffer, len)
             .map_err(|_| PyRuntimeError::new_err("Encryption failed"))?;
-        Ok(PyBytes::new_bound(py, &buffer))
+        Ok(PyBytes::new(py, &buffer))
     }
 
     /// Decrypt data.
@@ -196,7 +196,7 @@ impl TwofishCBC {
             .map_err(|e| PyRuntimeError::new_err(format!("Decryption failed: {}", e)))?;
 
         let plaintext = remove_padding(&buffer, self.padding)?;
-        Ok(PyBytes::new_bound(py, plaintext))
+        Ok(PyBytes::new(py, plaintext))
     }
 }
 
@@ -254,7 +254,7 @@ impl TwofishCTR {
         let mut cipher = cipher::StreamCipherCoreWrapper::from_core(core);
         let mut buffer = data.to_vec();
         cipher.apply_keystream(&mut buffer);
-        Ok(PyBytes::new_bound(py, &buffer))
+        Ok(PyBytes::new(py, &buffer))
     }
 
     /// Decrypt data.
@@ -321,7 +321,7 @@ impl TwofishCFB {
             .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
         let mut buffer = data.to_vec();
         cipher.encrypt(&mut buffer);
-        Ok(PyBytes::new_bound(py, &buffer))
+        Ok(PyBytes::new(py, &buffer))
     }
 
     /// Decrypt data.
@@ -336,7 +336,7 @@ impl TwofishCFB {
             .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
         let mut buffer = data.to_vec();
         cipher.decrypt(&mut buffer);
-        Ok(PyBytes::new_bound(py, &buffer))
+        Ok(PyBytes::new(py, &buffer))
     }
 }
 
@@ -393,7 +393,7 @@ impl TwofishOFB {
         let mut cipher = cipher::StreamCipherCoreWrapper::from_core(core);
         let mut buffer = data.to_vec();
         cipher.apply_keystream(&mut buffer);
-        Ok(PyBytes::new_bound(py, &buffer))
+        Ok(PyBytes::new(py, &buffer))
     }
 
     /// Decrypt data.

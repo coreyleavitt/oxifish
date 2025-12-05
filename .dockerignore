@@ -1,0 +1,8 @@
+.git
+.ruff_cache
+target
+.venv
+__pycache__
+*.pyc
+*.egg-info
+dist
