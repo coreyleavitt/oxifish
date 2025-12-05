@@ -33,15 +33,6 @@ Homepage = "https://github.com/coreyleavitt/oxifish"
 Repository = "https://github.com/coreyleavitt/oxifish"
 Issues = "https://github.com/coreyleavitt/oxifish/issues"
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-cov>=4.1",
-    "hypothesis>=6.100",
-    "mypy>=1.8",
-    "ruff>=0.3",
-]
-
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "python"
@@ -63,3 +54,12 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "UP", "S", "B"]
 ignore = ["S101"]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.148.7",
+    "mypy>=1.19.0",
+    "pytest>=9.0.1",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.8",
+]

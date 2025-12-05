@@ -16,11 +16,11 @@ RUN pip install --no-cache-dir uv && \
 WORKDIR /app
 
 # Copy project files
-COPY Cargo.toml pyproject.toml README.md ./
+COPY Cargo.toml pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 COPY python/ ./python/
 COPY tests/ ./tests/
 
-# Install dev dependencies and build extension in-place
-RUN pip install -e ".[dev]" --no-build-isolation && \
-    pytest tests/ -v
+# Install dev dependencies and build extension
+RUN uv sync --dev && \
+    uv run pytest tests/ -v
