@@ -1,7 +1,8 @@
 """Property-based tests for oxifish using Hypothesis."""
 
-from hypothesis import given, settings, strategies as st
-
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from oxifish import (
     Padding,
     TwofishCBC,
@@ -10,7 +11,6 @@ from oxifish import (
     TwofishECB,
     TwofishOFB,
 )
-
 
 # Strategies for generating test data
 valid_key_lengths = st.sampled_from([16, 24, 32])
@@ -40,15 +40,10 @@ class TestECBProperties:
         assert cipher1.encrypt_block(block) == cipher2.encrypt_block(block)
 
     @given(key=keys, block=blocks)
-    def test_ecb_ciphertext_differs_from_plaintext(self, key: bytes, block: bytes) -> None:
-        """Ciphertext should differ from plaintext (except for rare collisions)."""
+    def test_ecb_encrypt_does_not_crash(self, key: bytes, block: bytes) -> None:
+        """Encryption should not crash for any valid input."""
         cipher = TwofishECB(key)
-        ciphertext = cipher.encrypt_block(block)
-        # This could theoretically fail for some pathological key/block combo
-        # but is astronomically unlikely for random data
-        if key != b"\x00" * len(key) or block != b"\x00" * 16:
-            # Skip the all-zeros case which might have special behavior
-            pass  # We just verify it doesn't crash
+        cipher.encrypt_block(block)  # Just verify it doesn't crash
 
 
 class TestCBCProperties:
@@ -203,31 +198,22 @@ class TestInvalidInputs:
     @given(key=st.binary(min_size=0, max_size=64).filter(lambda k: len(k) not in (16, 24, 32)))
     def test_invalid_key_rejected(self, key: bytes) -> None:
         """Invalid key sizes should raise ValueError."""
-        try:
+        with pytest.raises(ValueError):
             TwofishECB(key)
-            assert False, f"Should have rejected key of length {len(key)}"
-        except ValueError:
-            pass  # Expected
 
     @given(iv=st.binary(min_size=0, max_size=64).filter(lambda iv: len(iv) != 16))
     def test_invalid_iv_rejected(self, iv: bytes) -> None:
         """Invalid IV sizes should raise ValueError."""
         key = b"\x00" * 16
-        try:
+        with pytest.raises(ValueError):
             TwofishCBC(key, iv)
-            assert False, f"Should have rejected IV of length {len(iv)}"
-        except ValueError:
-            pass  # Expected
 
     @given(block=st.binary(min_size=0, max_size=64).filter(lambda b: len(b) != 16))
     def test_invalid_block_rejected(self, block: bytes) -> None:
         """Invalid block sizes should raise ValueError for ECB."""
         cipher = TwofishECB(b"\x00" * 16)
-        try:
+        with pytest.raises(ValueError):
             cipher.encrypt_block(block)
-            assert False, f"Should have rejected block of length {len(block)}"
-        except ValueError:
-            pass  # Expected
 
 
 class TestCrossMode:
@@ -241,10 +227,6 @@ class TestCrossMode:
         """Different modes should produce different ciphertext."""
         cbc = TwofishCBC(key, iv, Padding.Pkcs7).encrypt(plaintext)
         ctr = TwofishCTR(key, iv).encrypt(plaintext)
-        cfb = TwofishCFB(key, iv).encrypt(plaintext)
-        ofb = TwofishOFB(key, iv).encrypt(plaintext)
 
-        # All should be different (extremely unlikely to collide)
-        outputs = [cbc, ctr, cfb, ofb]
-        # At minimum, stream modes (CTR/CFB/OFB) differ from CBC due to length
-        assert len(cbc) != len(ctr)  # CBC has padding, CTR doesn't
+        # CBC has padding so ciphertext is longer than stream modes
+        assert len(cbc) != len(ctr)
