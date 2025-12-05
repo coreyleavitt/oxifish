@@ -4,21 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: 'Version bump type (ignored for testpypi)'
+        description: 'Version bump (ignored for testpypi)'
         required: true
         type: choice
         options:
           - patch
           - minor
           - major
+          - stable
+          - 'no'
       prerelease:
-        description: 'Prerelease type (optional, ignored for testpypi)'
-        required: false
+        description: 'Prerelease type (ignored for testpypi)'
+        required: true
+        default: 'no'
         type: choice
         options:
-          - ''
+          - 'no'
           - alpha
           - beta
+          - rc
       target:
         description: 'Publish target'
         required: true
@@ -55,10 +59,24 @@ jobs:
             echo "commit_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
           else
             # For PyPI: bump version and commit
-            if [ -n "${{ inputs.prerelease }}" ]; then
-              uv version --bump ${{ inputs.bump }} --prerelease ${{ inputs.prerelease }}
+            BUMP="${{ inputs.bump }}"
+            PRERELEASE="${{ inputs.prerelease }}"
+
+            if [ "$BUMP" = "stable" ]; then
+              # Promote prerelease to stable
+              uv version --bump stable
+            elif [ "$BUMP" = "no" ] && [ "$PRERELEASE" = "no" ]; then
+              echo "Error: Must specify either a version bump or prerelease type"
+              exit 1
+            elif [ "$BUMP" = "no" ]; then
+              # Prerelease-only bump (a1→a2, rc1→rc2)
+              uv version --bump "$PRERELEASE"
+            elif [ "$PRERELEASE" = "no" ]; then
+              # Stable version bump
+              uv version --bump "$BUMP"
             else
-              uv version --bump ${{ inputs.bump }}
+              # Version bump + prerelease (0.1.0 → 0.1.1a1)
+              uv version --bump "$BUMP" --bump "$PRERELEASE"
             fi
             VERSION=$(uv version --short)
             echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -277,7 +295,7 @@ jobs:
       - name: Create release
         run: |
           VERSION="${{ needs.prepare-version.outputs.version }}"
-          if echo "$VERSION" | grep -qE '(a|b)[0-9]+'; then
+          if echo "$VERSION" | grep -qE '(a|b|rc)[0-9]+'; then
             gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes --prerelease
           else
             gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes
