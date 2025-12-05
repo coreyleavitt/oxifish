@@ -1,10 +1,24 @@
 name: Release
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
+      bump:
+        description: 'Version bump type (ignored for testpypi)'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      prerelease:
+        description: 'Prerelease type (optional, ignored for testpypi)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - alpha
+          - beta
       target:
         description: 'Publish target'
         required: true
@@ -15,14 +29,95 @@ on:
           - pypi
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  prepare-version:
+    name: Prepare version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      commit_sha: ${{ steps.version.outputs.commit_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ inputs.target }}" = "testpypi" ]; then
+            # For TestPyPI: use current version + .dev suffix (no commit)
+            CURRENT=$(uv version --short)
+            VERSION="${CURRENT}.dev${{ github.run_number }}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+          else
+            # For PyPI: bump version and commit
+            if [ -n "${{ inputs.prerelease }}" ]; then
+              uv version --bump ${{ inputs.bump }} --prerelease ${{ inputs.prerelease }}
+            else
+              uv version --bump ${{ inputs.bump }}
+            fi
+            VERSION=$(uv version --short)
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+            # Update Cargo.toml
+            sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+            # Commit via API (signed)
+            PYPROJECT_CONTENT=$(base64 -w 0 pyproject.toml)
+            PYPROJECT_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
+              -f content="$PYPROJECT_CONTENT" \
+              -f encoding=base64 \
+              --jq '.sha')
+
+            CARGO_CONTENT=$(base64 -w 0 Cargo.toml)
+            CARGO_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
+              -f content="$CARGO_CONTENT" \
+              -f encoding=base64 \
+              --jq '.sha')
+
+            TREE_SHA=$(gh api repos/${{ github.repository }}/git/trees \
+              --raw-field base_tree="${{ github.sha }}" \
+              --raw-field 'tree=[{"path":"pyproject.toml","mode":"100644","type":"blob","sha":"'"$PYPROJECT_SHA"'"},{"path":"Cargo.toml","mode":"100644","type":"blob","sha":"'"$CARGO_SHA"'"}]' \
+              --jq '.sha')
+
+            COMMIT_SHA=$(gh api repos/${{ github.repository }}/git/commits \
+              -f message="Bump version to $VERSION [skip ci]" \
+              -f tree="$TREE_SHA" \
+              -f "parents[]=${{ github.sha }}" \
+              --jq '.sha')
+
+            gh api repos/${{ github.repository }}/git/refs/heads/${{ github.ref_name }} \
+              -X PATCH \
+              -f sha="$COMMIT_SHA"
+
+            echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build-sdist:
     name: Build source distribution
+    needs: [prepare-version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.commit_sha }}
+
+      - name: Install uv
+        if: inputs.target == 'testpypi'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set dev version for TestPyPI
+        if: inputs.target == 'testpypi'
+        run: |
+          VERSION="${{ needs.prepare-version.outputs.version }}"
+          uv version "$VERSION"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -38,6 +133,7 @@ jobs:
 
   build-wheels:
     name: ${{ matrix.name }}
+    needs: [prepare-version]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,7 +160,7 @@ jobs:
             target: aarch64
             manylinux: musllinux_1_2
           - name: macOS x86_64 (Intel)
-            os: macos-15-intel
+            os: macos-13
             target: x86_64
             manylinux: auto
           - name: macOS aarch64 (Apple Silicon)
@@ -78,6 +174,31 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-version.outputs.commit_sha }}
+
+      - name: Install uv (Unix)
+        if: inputs.target == 'testpypi' && matrix.os != 'windows-latest'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install uv (Windows)
+        if: inputs.target == 'testpypi' && matrix.os == 'windows-latest'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set dev version for TestPyPI (Unix)
+        if: inputs.target == 'testpypi' && matrix.os != 'windows-latest'
+        run: |
+          VERSION="${{ needs.prepare-version.outputs.version }}"
+          uv version "$VERSION"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+      - name: Set dev version for TestPyPI (Windows)
+        if: inputs.target == 'testpypi' && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ needs.prepare-version.outputs.version }}"
+          uv version $VERSION
+          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$VERSION`"" | Set-Content Cargo.toml
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -94,9 +215,9 @@ jobs:
 
   publish-testpypi:
     name: Publish to TestPyPI
-    needs: [build-sdist, build-wheels]
+    needs: [prepare-version, build-sdist, build-wheels]
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'
+    if: inputs.target == 'testpypi'
     environment:
       name: testpypi
       url: https://test.pypi.org/project/oxifish/
@@ -118,9 +239,9 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [build-sdist, build-wheels]
+    needs: [prepare-version, build-sdist, build-wheels]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi')
+    if: inputs.target == 'pypi'
     environment:
       name: pypi
       url: https://pypi.org/project/oxifish/
@@ -137,3 +258,29 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  create-release:
+    name: Create GitHub Release
+    needs: [prepare-version, publish-pypi]
+    runs-on: ubuntu-latest
+    if: inputs.target == 'pypi'
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        run: |
+          VERSION="${{ needs.prepare-version.outputs.version }}"
+          if echo "$VERSION" | grep -qE '(a|b)[0-9]+'; then
+            gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes --prerelease
+          else
+            gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
