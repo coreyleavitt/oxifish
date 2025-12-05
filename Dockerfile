@@ -11,7 +11,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install uv and maturin
 RUN pip install --no-cache-dir uv && \
-    uv pip install --system maturin pytest
+    uv pip install --system maturin
 
 WORKDIR /app
 
@@ -21,9 +21,6 @@ COPY src/ ./src/
 COPY python/ ./python/
 COPY tests/ ./tests/
 
-# Build the extension
-RUN maturin build --release
-
-# Install the wheel and run tests
-RUN pip install target/wheels/*.whl && \
+# Install dev dependencies and build extension in-place
+RUN pip install -e ".[dev]" --no-build-isolation && \
     pytest tests/ -v
