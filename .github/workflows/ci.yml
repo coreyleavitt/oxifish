@@ -21,11 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -33,7 +28,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --python ${{ matrix.python-version }}
 
       - name: Run tests
         run: uv run pytest tests/ -v
@@ -59,19 +54,11 @@ jobs:
             -A clippy::manual_is_multiple_of \
             -A clippy::manual_repeat_n
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Install Python linters
-        run: uv pip install --system ruff mypy
-
       - name: Ruff check
-        run: ruff check python/ tests/
+        run: uvx ruff check python/ tests/
 
       - name: Ruff format check
-        run: ruff format --check python/ tests/
+        run: uvx ruff format --check python/ tests/
