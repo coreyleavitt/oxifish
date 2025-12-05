@@ -13,10 +13,11 @@ pip install oxifish
 ### CBC Mode (with padding)
 
 ```python
+import secrets
 from oxifish import TwofishCBC, Padding
 
-key = b'0123456789abcdef'  # 16, 24, or 32 bytes
-iv = b'fedcba9876543210'   # 16 bytes
+key = secrets.token_bytes(16)  # 16, 24, or 32 bytes
+iv = secrets.token_bytes(16)   # MUST be unique per encryption
 
 # Encrypt (PKCS7 padding is the default)
 cipher = TwofishCBC(key, iv, Padding.Pkcs7)
@@ -26,29 +27,40 @@ ciphertext = cipher.encrypt(b'Hello, World!')
 cipher = TwofishCBC(key, iv, Padding.Pkcs7)
 plaintext = cipher.decrypt(ciphertext)
 # b'Hello, World!'
+
+# Store IV with ciphertext (IV is not secret)
+encrypted_message = iv + ciphertext
 ```
 
 ### CTR Mode (no padding needed)
 
 ```python
+import secrets
 from oxifish import TwofishCTR
 
-cipher = TwofishCTR(key, nonce=iv)
+key = secrets.token_bytes(16)
+nonce = secrets.token_bytes(16)  # MUST be unique per encryption
+
+cipher = TwofishCTR(key, nonce)
 ciphertext = cipher.encrypt(b'any length data')
 
-cipher = TwofishCTR(key, nonce=iv)
+cipher = TwofishCTR(key, nonce)
 plaintext = cipher.decrypt(ciphertext)
 ```
 
 ### ECB Mode (single blocks only)
 
 ```python
+import secrets
 from oxifish import TwofishECB
 
+key = secrets.token_bytes(16)
 cipher = TwofishECB(key)
 ciphertext = cipher.encrypt_block(b'16 byte block!!')
 plaintext = cipher.decrypt_block(ciphertext)
 ```
+
+**Warning**: ECB mode does NOT provide semantic security. Use CBC, CTR, or other modes for general encryption.
 
 ### Available Modes
 

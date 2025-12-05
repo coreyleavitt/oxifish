@@ -4,15 +4,22 @@ This package provides Twofish encryption in multiple modes (ECB, CBC, CTR, CFB, 
 wrapping the RustCrypto `twofish` crate via PyO3.
 
 Example:
+    >>> import secrets
     >>> from oxifish import TwofishCBC, Padding
-    >>> key = b'0123456789abcdef'  # 16, 24, or 32 bytes
-    >>> iv = b'fedcba9876543210'   # 16 bytes
+    >>> key = secrets.token_bytes(16)  # 16, 24, or 32 bytes
+    >>> iv = secrets.token_bytes(16)   # MUST be unique per encryption
     >>> cipher = TwofishCBC(key, iv, Padding.Pkcs7)
     >>> ciphertext = cipher.encrypt(b'Hello, World!')
+    >>> # Store IV with ciphertext (IV is not secret)
+    >>> encrypted_message = iv + ciphertext
+    >>> # Decrypt (new instance required - cipher is stateful)
     >>> cipher2 = TwofishCBC(key, iv, Padding.Pkcs7)
     >>> plaintext = cipher2.decrypt(ciphertext)
     >>> plaintext
     b'Hello, World!'
+
+IMPORTANT: IVs/nonces MUST be unique for each encryption with the same key.
+Reusing an IV with the same key completely breaks the security of CBC and CTR modes.
 
 Available Modes:
     - TwofishECB: Electronic Codebook (single block operations)
