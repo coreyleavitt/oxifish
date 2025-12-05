@@ -92,9 +92,7 @@ class TestCBCProperties:
         assert len(ciphertext) == expected_len
 
     @given(key=keys, iv1=ivs, iv2=ivs, plaintext=non_empty_plaintexts)
-    def test_cbc_different_ivs(
-        self, key: bytes, iv1: bytes, iv2: bytes, plaintext: bytes
-    ) -> None:
+    def test_cbc_different_ivs(self, key: bytes, iv1: bytes, iv2: bytes, plaintext: bytes) -> None:
         """Different IVs should produce different ciphertext."""
         if iv1 == iv2:
             return  # Skip if IVs happen to be equal
@@ -221,9 +219,7 @@ class TestCrossMode:
 
     @given(key=keys, iv=ivs, plaintext=non_empty_plaintexts)
     @settings(max_examples=50)
-    def test_modes_produce_different_output(
-        self, key: bytes, iv: bytes, plaintext: bytes
-    ) -> None:
+    def test_modes_produce_different_output(self, key: bytes, iv: bytes, plaintext: bytes) -> None:
         """Different modes should produce different ciphertext."""
         cbc = TwofishCBC(key, iv, Padding.Pkcs7).encrypt(plaintext)
         ctr = TwofishCTR(key, iv).encrypt(plaintext)

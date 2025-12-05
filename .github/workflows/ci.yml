@@ -33,19 +33,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: |
-          uv pip install --system maturin pytest
-
-      - name: Build wheel
-        run: maturin build --release
-
-      - name: Install wheel
-        shell: bash
-        run: |
-          pip install target/wheels/*.whl
+        run: uv sync --dev
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: uv run pytest tests/ -v
 
   lint:
     runs-on: ubuntu-latest
