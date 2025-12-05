@@ -10,27 +10,37 @@ pip install oxifish
 
 ## Usage
 
+### CBC Mode (with padding)
+
 ```python
-from oxifish import TwofishCBC
+from oxifish import TwofishCBC, Padding
 
-# Key must be 16, 24, or 32 bytes (128, 192, or 256 bits)
-key = b'0123456789abcdef'
-# IV must be 16 bytes
-iv = b'fedcba9876543210'
+key = b'0123456789abcdef'  # 16, 24, or 32 bytes
+iv = b'fedcba9876543210'   # 16 bytes
 
-# Encrypt
-cipher = TwofishCBC(key, iv)
+# Encrypt (PKCS7 padding is the default)
+cipher = TwofishCBC(key, iv, Padding.Pkcs7)
 ciphertext = cipher.encrypt(b'Hello, World!')
 
-# Decrypt (create new instance with same key/iv)
-cipher = TwofishCBC(key, iv)
+# Decrypt (new instance required - cipher is stateful)
+cipher = TwofishCBC(key, iv, Padding.Pkcs7)
 plaintext = cipher.decrypt(ciphertext)
 # b'Hello, World!'
 ```
 
-### ECB Mode
+### CTR Mode (no padding needed)
 
-For low-level block operations (use CBC for actual encryption):
+```python
+from oxifish import TwofishCTR
+
+cipher = TwofishCTR(key, nonce=iv)
+ciphertext = cipher.encrypt(b'any length data')
+
+cipher = TwofishCTR(key, nonce=iv)
+plaintext = cipher.decrypt(ciphertext)
+```
+
+### ECB Mode (single blocks only)
 
 ```python
 from oxifish import TwofishECB
@@ -40,15 +50,23 @@ ciphertext = cipher.encrypt_block(b'16 byte block!!')
 plaintext = cipher.decrypt_block(ciphertext)
 ```
 
-## Security Considerations
+### Available Modes
 
-The Twofish algorithm uses key-dependent S-boxes, which means this implementation is **not constant-time** and may be vulnerable to cache timing attacks in adversarial environments. This is an inherent property of the Twofish algorithm, not a flaw in this implementation.
+| Mode | Padding | Use Case |
+|------|---------|----------|
+| `TwofishCBC` | Required (Pkcs7, Zeros, Iso7816, AnsiX923, NoPadding) | General encryption |
+| `TwofishCTR` | Not needed | Stream encryption |
+| `TwofishCFB` | Not needed | Stream encryption |
+| `TwofishOFB` | Not needed | Stream encryption |
+| `TwofishECB` | N/A (block-level) | Building blocks, compatibility |
 
-For new applications where timing attacks are a concern, consider using:
-- AES with hardware acceleration (AES-NI)
-- ChaCha20
+## Security
 
 This library is primarily intended for compatibility with existing systems that require Twofish, such as KeePass databases.
+
+**Note**: Twofish is not constant-time due to key-dependent S-boxes. This is fine for local file decryption but not suitable for server-side encryption where timing attacks are feasible. For new projects, prefer AES-GCM or ChaCha20-Poly1305.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and details on key zeroization.
 
 ## Development
 
