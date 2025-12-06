@@ -17,9 +17,11 @@ const BLOCK_SIZE_BYTES: usize = 16;
 type TwofishCbcEnc = cbc::Encryptor<Twofish>;
 type TwofishCbcDec = cbc::Decryptor<Twofish>;
 type TwofishCtrCore = ctr::CtrCore<Twofish, ctr::flavors::Ctr128BE>;
+type TwofishCtr = cipher::StreamCipherCoreWrapper<TwofishCtrCore>;
 type TwofishCfbEnc = cfb_mode::Encryptor<Twofish>;
 type TwofishCfbDec = cfb_mode::Decryptor<Twofish>;
 type TwofishOfbCore = ofb::OfbCore<Twofish>;
+type TwofishOfb = cipher::StreamCipherCoreWrapper<TwofishOfbCore>;
 
 // ============================================================================
 // Enums
@@ -546,11 +548,11 @@ impl Drop for TwofishCBC {
 // ============================================================================
 
 /// Streaming CTR encryptor/decryptor.
+///
+/// Stores the cipher state to provide O(1) streaming performance.
 #[pyclass]
 struct TwofishCTRCipher {
-    key: Vec<u8>,
-    nonce: Vec<u8>,
-    counter_offset: usize,
+    cipher: Option<TwofishCtr>,
     finalized: bool,
 }
 
@@ -565,40 +567,13 @@ impl TwofishCTRCipher {
             return Ok(PyBytes::new(py, &[]));
         }
 
-        // For CTR, we need to handle the counter offset properly
-        // This simplified version starts fresh each update (suitable for chunk processing)
-        // A more sophisticated version would track exact byte offset
-        let twofish = Twofish::new_from_slice(&self.key)
-            .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
-
-        // Increment nonce based on blocks processed
-        let mut nonce_bytes = self.nonce.clone();
-        let blocks_offset = self.counter_offset / BLOCK_SIZE_BYTES;
-
-        // Add offset to nonce (big-endian increment)
-        let mut carry = blocks_offset;
-        for i in (0..16).rev() {
-            let sum = nonce_bytes[i] as usize + (carry & 0xff);
-            nonce_bytes[i] = sum as u8;
-            carry = (carry >> 8) + (sum >> 8);
-        }
-
-        let nonce_arr = cipher::generic_array::GenericArray::from_slice(&nonce_bytes);
-        let core = TwofishCtrCore::inner_iv_init(twofish, nonce_arr);
-        let mut cipher = cipher::StreamCipherCoreWrapper::from_core(core);
-
-        // Handle partial block offset within the first block
-        let byte_offset = self.counter_offset % BLOCK_SIZE_BYTES;
-        if byte_offset > 0 {
-            // Skip bytes in first block
-            let mut skip = vec![0u8; byte_offset];
-            cipher.apply_keystream(&mut skip);
-        }
+        let cipher = self
+            .cipher
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("Cipher not initialized"))?;
 
         let mut buffer = data.to_vec();
         cipher.apply_keystream(&mut buffer);
-
-        self.counter_offset += data.len();
 
         Ok(PyBytes::new(py, &buffer))
     }
@@ -609,16 +584,14 @@ impl TwofishCTRCipher {
             return Err(PyRuntimeError::new_err("Cipher already finalized"));
         }
         self.finalized = true;
+        // Drop the cipher to release resources
+        self.cipher = None;
         Ok(PyBytes::new(py, &[]))
     }
 }
 
-impl Drop for TwofishCTRCipher {
-    fn drop(&mut self) {
-        self.key.zeroize();
-        self.nonce.zeroize();
-    }
-}
+// Note: TwofishCtr contains the key material internally and the underlying
+// Twofish cipher implements ZeroizeOnDrop, so key material is securely cleared.
 
 /// Twofish block cipher in CTR mode.
 #[pyclass]
@@ -647,10 +620,15 @@ impl TwofishCTR {
     /// Create a streaming cipher with the given nonce.
     fn encryptor(&self, nonce: &[u8]) -> PyResult<TwofishCTRCipher> {
         validate_iv_length(nonce.len())?;
+
+        let twofish = Twofish::new_from_slice(&self.key)
+            .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
+        let nonce_arr = cipher::generic_array::GenericArray::from_slice(nonce);
+        let core = TwofishCtrCore::inner_iv_init(twofish, nonce_arr);
+        let cipher = cipher::StreamCipherCoreWrapper::from_core(core);
+
         Ok(TwofishCTRCipher {
-            key: self.key.clone(),
-            nonce: nonce.to_vec(),
-            counter_offset: 0,
+            cipher: Some(cipher),
             finalized: false,
         })
     }
@@ -908,11 +886,11 @@ impl Drop for TwofishCFB {
 // ============================================================================
 
 /// Streaming OFB cipher.
+///
+/// Stores the cipher state to provide O(1) streaming performance.
 #[pyclass]
 struct TwofishOFBCipher {
-    key: Vec<u8>,
-    nonce: Vec<u8>,
-    counter_offset: usize,
+    cipher: Option<TwofishOfb>,
     finalized: bool,
 }
 
@@ -926,23 +904,13 @@ impl TwofishOFBCipher {
             return Ok(PyBytes::new(py, &[]));
         }
 
-        // Similar to CTR, OFB generates keystream independent of data
-        let twofish = Twofish::new_from_slice(&self.key)
-            .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
-        let iv_arr = cipher::generic_array::GenericArray::from_slice(&self.nonce);
-        let core = TwofishOfbCore::inner_iv_init(twofish, iv_arr);
-        let mut cipher = cipher::StreamCipherCoreWrapper::from_core(core);
-
-        // Skip to current position
-        if self.counter_offset > 0 {
-            let mut skip = vec![0u8; self.counter_offset];
-            cipher.apply_keystream(&mut skip);
-        }
+        let cipher = self
+            .cipher
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("Cipher not initialized"))?;
 
         let mut buffer = data.to_vec();
         cipher.apply_keystream(&mut buffer);
-
-        self.counter_offset += data.len();
 
         Ok(PyBytes::new(py, &buffer))
     }
@@ -952,16 +920,14 @@ impl TwofishOFBCipher {
             return Err(PyRuntimeError::new_err("Cipher already finalized"));
         }
         self.finalized = true;
+        // Drop the cipher to release resources
+        self.cipher = None;
         Ok(PyBytes::new(py, &[]))
     }
 }
 
-impl Drop for TwofishOFBCipher {
-    fn drop(&mut self) {
-        self.key.zeroize();
-        self.nonce.zeroize();
-    }
-}
+// Note: TwofishOfb contains the key material internally and the underlying
+// Twofish cipher implements ZeroizeOnDrop, so key material is securely cleared.
 
 /// Twofish block cipher in OFB mode.
 #[pyclass]
@@ -989,10 +955,15 @@ impl TwofishOFB {
 
     fn encryptor(&self, iv: &[u8]) -> PyResult<TwofishOFBCipher> {
         validate_iv_length(iv.len())?;
+
+        let twofish = Twofish::new_from_slice(&self.key)
+            .map_err(|e| PyRuntimeError::new_err(format!("Cipher init failed: {}", e)))?;
+        let iv_arr = cipher::generic_array::GenericArray::from_slice(iv);
+        let core = TwofishOfbCore::inner_iv_init(twofish, iv_arr);
+        let cipher = cipher::StreamCipherCoreWrapper::from_core(core);
+
         Ok(TwofishOFBCipher {
-            key: self.key.clone(),
-            nonce: iv.to_vec(),
-            counter_offset: 0,
+            cipher: Some(cipher),
             finalized: false,
         })
     }
