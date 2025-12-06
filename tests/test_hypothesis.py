@@ -244,7 +244,7 @@ class TestPaddingProperties:
         assert len(padded) % 16 == 0
         assert len(padded) > len(data)
 
-    @given(data=plaintexts.filter(lambda x: len(x) > 0 and not x.endswith(b'\x00')))
+    @given(data=plaintexts.filter(lambda x: len(x) > 0 and not x.endswith(b"\x00")))
     def test_zeros_roundtrip_safe_data(self, data: bytes) -> None:
         """Zero padding roundtrip works for non-empty data not ending with zeros."""
         padded = pad(data, 16, PaddingStyle.Zeros)

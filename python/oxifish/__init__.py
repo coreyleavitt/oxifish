@@ -43,28 +43,28 @@ Security Note:
 """
 
 from oxifish._oxifish import (
+    # Constants
+    BLOCK_SIZE,
     # Enums
     BlockSize,
     KeySize,
     PaddingStyle,
-    # Cipher classes
-    TwofishECB,
     TwofishCBC,
-    TwofishCTR,
-    TwofishCFB,
-    TwofishOFB,
+    TwofishCBCDecryptor,
     # Streaming cipher classes (returned by encryptor/decryptor methods)
     TwofishCBCEncryptor,
-    TwofishCBCDecryptor,
-    TwofishCTRCipher,
-    TwofishCFBEncryptor,
+    TwofishCFB,
     TwofishCFBDecryptor,
+    TwofishCFBEncryptor,
+    TwofishCTR,
+    TwofishCTRCipher,
+    # Cipher classes
+    TwofishECB,
+    TwofishOFB,
     TwofishOFBCipher,
     # Padding functions
     pad,
     unpad,
-    # Constants
-    BLOCK_SIZE,
 )
 
 __all__ = [
