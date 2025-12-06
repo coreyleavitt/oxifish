@@ -521,3 +521,148 @@ class TestAllKeyLengths:
         decrypted = cipher.decrypt(ciphertext, iv)
 
         assert decrypted == plaintext
+
+
+class TestCrossImplementationVectors:
+    """Cross-implementation test vectors verified against twofish Python package.
+
+    These vectors ensure our CBC, CTR, CFB, and OFB implementations match
+    other Twofish implementations.
+    """
+
+    # Vector 1: All zeros (128-bit key)
+    # For all-zeros input, CBC/CTR/CFB/OFB all produce the same output
+    # because E(0) XOR 0 = E(0) and E(0 XOR 0) = E(0)
+    def test_vector1_128bit_cbc(self) -> None:
+        """Test CBC with 128-bit all-zeros vector."""
+        key = bytes.fromhex("00000000000000000000000000000000")
+        iv = bytes.fromhex("00000000000000000000000000000000")
+        plaintext = bytes.fromhex("00000000000000000000000000000000")
+        expected = bytes.fromhex("9f589f5cf6122c32b6bfec2f2ae8c35a")
+
+        cipher = TwofishCBC(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    def test_vector1_128bit_ctr(self) -> None:
+        """Test CTR with 128-bit all-zeros vector."""
+        key = bytes.fromhex("00000000000000000000000000000000")
+        nonce = bytes.fromhex("00000000000000000000000000000000")
+        plaintext = bytes.fromhex("00000000000000000000000000000000")
+        expected = bytes.fromhex("9f589f5cf6122c32b6bfec2f2ae8c35a")
+
+        cipher = TwofishCTR(key)
+        ciphertext = cipher.encrypt(plaintext, nonce)
+        assert ciphertext == expected
+
+    def test_vector1_128bit_cfb(self) -> None:
+        """Test CFB with 128-bit all-zeros vector."""
+        key = bytes.fromhex("00000000000000000000000000000000")
+        iv = bytes.fromhex("00000000000000000000000000000000")
+        plaintext = bytes.fromhex("00000000000000000000000000000000")
+        expected = bytes.fromhex("9f589f5cf6122c32b6bfec2f2ae8c35a")
+
+        cipher = TwofishCFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    def test_vector1_128bit_ofb(self) -> None:
+        """Test OFB with 128-bit all-zeros vector."""
+        key = bytes.fromhex("00000000000000000000000000000000")
+        iv = bytes.fromhex("00000000000000000000000000000000")
+        plaintext = bytes.fromhex("00000000000000000000000000000000")
+        expected = bytes.fromhex("9f589f5cf6122c32b6bfec2f2ae8c35a")
+
+        cipher = TwofishOFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    # Vector 2: Non-trivial (192-bit key)
+    def test_vector2_192bit_cbc(self) -> None:
+        """Test CBC with 192-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba98765432100011223344556677")
+        iv = bytes.fromhex("f0e1d2c3b4a5968778695a4b3c2d1e0f")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("742ca6db422942b78c47ef6c7db185d8")
+
+        cipher = TwofishCBC(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    def test_vector2_192bit_ctr(self) -> None:
+        """Test CTR with 192-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba98765432100011223344556677")
+        nonce = bytes.fromhex("f0e1d2c3b4a5968778695a4b3c2d1e0f")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("4605106ad990fea6659ce93fb8b9a921")
+
+        cipher = TwofishCTR(key)
+        ciphertext = cipher.encrypt(plaintext, nonce)
+        assert ciphertext == expected
+
+    def test_vector2_192bit_cfb(self) -> None:
+        """Test CFB with 192-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba98765432100011223344556677")
+        iv = bytes.fromhex("f0e1d2c3b4a5968778695a4b3c2d1e0f")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("4605106ad990fea6659ce93fb8b9a921")
+
+        cipher = TwofishCFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    def test_vector2_192bit_ofb(self) -> None:
+        """Test OFB with 192-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba98765432100011223344556677")
+        iv = bytes.fromhex("f0e1d2c3b4a5968778695a4b3c2d1e0f")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("4605106ad990fea6659ce93fb8b9a921")
+
+        cipher = TwofishOFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    # Vector 3: 256-bit key
+    def test_vector3_256bit_cbc(self) -> None:
+        """Test CBC with 256-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba987654321000112233445566778899aabbccddeeff")
+        iv = bytes.fromhex("fedcba9876543210fedcba9876543210")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("8cb4fcbf0d29b43cb760563d68dd0530")
+
+        cipher = TwofishCBC(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    def test_vector3_256bit_ctr(self) -> None:
+        """Test CTR with 256-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba987654321000112233445566778899aabbccddeeff")
+        nonce = bytes.fromhex("fedcba9876543210fedcba9876543210")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("894a10bffd09d5937abb9f67bbf43fb9")
+
+        cipher = TwofishCTR(key)
+        ciphertext = cipher.encrypt(plaintext, nonce)
+        assert ciphertext == expected
+
+    def test_vector3_256bit_cfb(self) -> None:
+        """Test CFB with 256-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba987654321000112233445566778899aabbccddeeff")
+        iv = bytes.fromhex("fedcba9876543210fedcba9876543210")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("894a10bffd09d5937abb9f67bbf43fb9")
+
+        cipher = TwofishCFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
+
+    def test_vector3_256bit_ofb(self) -> None:
+        """Test OFB with 256-bit key vector."""
+        key = bytes.fromhex("0123456789abcdeffedcba987654321000112233445566778899aabbccddeeff")
+        iv = bytes.fromhex("fedcba9876543210fedcba9876543210")
+        plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+        expected = bytes.fromhex("894a10bffd09d5937abb9f67bbf43fb9")
+
+        cipher = TwofishOFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        assert ciphertext == expected
