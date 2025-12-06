@@ -42,13 +42,14 @@ Security Note:
     (with hardware acceleration) or ChaCha20 instead.
 """
 
+from enum import StrEnum
+
 from oxifish._oxifish import (
     # Constants
     BLOCK_SIZE,
     # Enums
     BlockSize,
     KeySize,
-    PaddingStyle,
     TwofishCBC,
     TwofishCBCDecryptor,
     # Streaming cipher classes (returned by encryptor/decryptor methods)
@@ -66,6 +67,22 @@ from oxifish._oxifish import (
     pad,
     unpad,
 )
+
+
+class PaddingStyle(StrEnum):
+    """Padding schemes for block cipher modes.
+
+    - Pkcs7: PKCS#7 padding (RFC 5652) - recommended for most uses
+    - Zeros: Zero padding (ambiguous if data ends with zeros)
+    - Iso7816: ISO/IEC 7816-4 padding
+    - AnsiX923: ANSI X9.23 padding
+    """
+
+    Pkcs7 = "pkcs7"
+    Zeros = "zeros"
+    Iso7816 = "iso7816"
+    AnsiX923 = "ansix923"
+
 
 __all__ = [
     # Enums

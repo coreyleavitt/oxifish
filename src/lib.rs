@@ -62,32 +62,8 @@ impl KeySize {
     }
 }
 
-/// Padding styles for block cipher data.
-/// StrEnum - string values for compatibility.
-#[pyclass(eq, eq_int)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PaddingStyle {
-    /// PKCS7 padding (RFC 5652)
-    Pkcs7 = 0,
-    /// Zero padding (ambiguous if data ends with zeros)
-    Zeros = 1,
-    /// ISO/IEC 7816-4 padding
-    Iso7816 = 2,
-    /// ANSI X9.23 padding
-    AnsiX923 = 3,
-}
-
-#[pymethods]
-impl PaddingStyle {
-    fn __str__(&self) -> &'static str {
-        match self {
-            PaddingStyle::Pkcs7 => "pkcs7",
-            PaddingStyle::Zeros => "zeros",
-            PaddingStyle::Iso7816 => "iso7816",
-            PaddingStyle::AnsiX923 => "ansix923",
-        }
-    }
-}
+// PaddingStyle is now defined in Python as a StrEnum.
+// Rust accepts string values directly.
 
 // ============================================================================
 // Standalone padding functions
@@ -98,17 +74,17 @@ impl PaddingStyle {
 /// Args:
 ///     data: Data to pad
 ///     block_size: Block size in bytes (must be 1-255)
-///     style: Padding style (default: Pkcs7)
+///     style: Padding style (default: "pkcs7")
 ///
 /// Returns:
 ///     Padded data
 #[pyfunction]
-#[pyo3(signature = (data, block_size=16, style=PaddingStyle::Pkcs7))]
+#[pyo3(signature = (data, block_size=16, style="pkcs7"))]
 fn pad<'py>(
     py: Python<'py>,
     data: &[u8],
     block_size: u8,
-    style: PaddingStyle,
+    style: &str,
 ) -> PyResult<Bound<'py, PyBytes>> {
     if block_size == 0 {
         return Err(PyValueError::new_err("block_size must be at least 1"));
@@ -116,13 +92,13 @@ fn pad<'py>(
     let bs = block_size as usize;
 
     let padded = match style {
-        PaddingStyle::Pkcs7 => {
+        "pkcs7" => {
             let padding_len = bs - (data.len() % bs);
             let mut result = data.to_vec();
             result.extend(std::iter::repeat(padding_len as u8).take(padding_len));
             result
         }
-        PaddingStyle::Zeros => {
+        "zeros" => {
             let padding_len = if data.len() % bs == 0 {
                 0
             } else {
@@ -132,19 +108,25 @@ fn pad<'py>(
             result.extend(std::iter::repeat(0u8).take(padding_len));
             result
         }
-        PaddingStyle::Iso7816 => {
+        "iso7816" => {
             let padding_len = bs - (data.len() % bs);
             let mut result = data.to_vec();
             result.push(0x80);
             result.extend(std::iter::repeat(0u8).take(padding_len - 1));
             result
         }
-        PaddingStyle::AnsiX923 => {
+        "ansix923" => {
             let padding_len = bs - (data.len() % bs);
             let mut result = data.to_vec();
             result.extend(std::iter::repeat(0u8).take(padding_len - 1));
             result.push(padding_len as u8);
             result
+        }
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "Unknown padding style: '{}'. Valid styles: pkcs7, zeros, iso7816, ansix923",
+                style
+            )));
         }
     };
 
@@ -156,7 +138,7 @@ fn pad<'py>(
 /// Args:
 ///     data: Padded data
 ///     block_size: Block size in bytes (must be 1-255)
-///     style: Padding style (default: Pkcs7)
+///     style: Padding style (default: "pkcs7")
 ///
 /// Returns:
 ///     Unpadded data
@@ -164,12 +146,12 @@ fn pad<'py>(
 /// Raises:
 ///     ValueError: If padding is invalid
 #[pyfunction]
-#[pyo3(signature = (data, block_size=16, style=PaddingStyle::Pkcs7))]
+#[pyo3(signature = (data, block_size=16, style="pkcs7"))]
 fn unpad<'py>(
     py: Python<'py>,
     data: &[u8],
     block_size: u8,
-    style: PaddingStyle,
+    style: &str,
 ) -> PyResult<Bound<'py, PyBytes>> {
     if block_size == 0 {
         return Err(PyValueError::new_err("block_size must be at least 1"));
@@ -180,7 +162,7 @@ fn unpad<'py>(
     let bs = block_size as usize;
 
     let unpadded = match style {
-        PaddingStyle::Pkcs7 => {
+        "pkcs7" => {
             let padding_len = data[data.len() - 1] as usize;
             if padding_len == 0 || padding_len > bs || padding_len > data.len() {
                 return Err(PyValueError::new_err("Invalid PKCS7 padding"));
@@ -192,14 +174,14 @@ fn unpad<'py>(
             }
             &data[..data.len() - padding_len]
         }
-        PaddingStyle::Zeros => {
+        "zeros" => {
             let mut end = data.len();
             while end > 0 && data[end - 1] == 0 {
                 end -= 1;
             }
             &data[..end]
         }
-        PaddingStyle::Iso7816 => {
+        "iso7816" => {
             let mut end = data.len();
             while end > 0 && data[end - 1] == 0 {
                 end -= 1;
@@ -209,7 +191,7 @@ fn unpad<'py>(
             }
             &data[..end - 1]
         }
-        PaddingStyle::AnsiX923 => {
+        "ansix923" => {
             let padding_len = data[data.len() - 1] as usize;
             if padding_len == 0 || padding_len > bs || padding_len > data.len() {
                 return Err(PyValueError::new_err("Invalid ANSI X9.23 padding"));
@@ -220,6 +202,12 @@ fn unpad<'py>(
                 }
             }
             &data[..data.len() - padding_len]
+        }
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "Unknown padding style: '{}'. Valid styles: pkcs7, zeros, iso7816, ansix923",
+                style
+            )));
         }
     };
 
@@ -1082,10 +1070,9 @@ fn validate_iv_length(len: usize) -> PyResult<()> {
 
 #[pymodule]
 fn _oxifish(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Enums
+    // Enums (PaddingStyle is defined in Python as a StrEnum)
     m.add_class::<BlockSize>()?;
     m.add_class::<KeySize>()?;
-    m.add_class::<PaddingStyle>()?;
 
     // Cipher classes
     m.add_class::<TwofishECB>()?;

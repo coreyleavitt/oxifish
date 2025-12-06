@@ -51,3 +51,5 @@ htmlcov/
 # maturin
 *.whl
 .hypothesis/
+# Review docs
+REVIEW_*.md

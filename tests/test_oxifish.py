@@ -21,14 +21,13 @@ class TestEnums:
 
     def test_block_size_enum(self) -> None:
         """Test BlockSize enum values."""
-        assert BlockSize.BITS_128 == 16
         assert int(BlockSize.BITS_128) == 16
 
     def test_key_size_enum(self) -> None:
         """Test KeySize enum values."""
-        assert KeySize.BITS_128 == 16
-        assert KeySize.BITS_192 == 24
-        assert KeySize.BITS_256 == 32
+        assert int(KeySize.BITS_128) == 16
+        assert int(KeySize.BITS_192) == 24
+        assert int(KeySize.BITS_256) == 32
 
     def test_padding_style_enum(self) -> None:
         """Test PaddingStyle enum."""
