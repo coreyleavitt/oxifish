@@ -684,6 +684,9 @@ impl Drop for TwofishCTR {
 // ============================================================================
 
 /// Streaming CFB encryptor.
+///
+/// Note: CFB streaming requires block-aligned chunks (16 bytes) for correctness
+/// when processing multiple chunks. Use one-shot encrypt() for arbitrary lengths.
 #[pyclass]
 struct TwofishCFBEncryptor {
     key: Vec<u8>,
@@ -693,7 +696,7 @@ struct TwofishCFBEncryptor {
 
 #[pymethods]
 impl TwofishCFBEncryptor {
-    /// Process data. Any length is accepted.
+    /// Process data. For correct multi-chunk streaming, data must be block-aligned (16 bytes).
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         if self.finalized {
             return Err(PyRuntimeError::new_err("Encryptor already finalized"));
@@ -708,14 +711,9 @@ impl TwofishCFBEncryptor {
         let mut buffer = data.to_vec();
         cipher.encrypt(&mut buffer);
 
-        // For CFB, update IV with last ciphertext block
+        // Update feedback state with last ciphertext block
         if buffer.len() >= BLOCK_SIZE_BYTES {
             self.last_block = buffer[buffer.len() - BLOCK_SIZE_BYTES..].to_vec();
-        } else {
-            // Partial block - shift and append
-            let shift = buffer.len();
-            self.last_block.drain(0..shift);
-            self.last_block.extend_from_slice(&buffer);
         }
 
         Ok(PyBytes::new(py, &buffer))
@@ -738,6 +736,9 @@ impl Drop for TwofishCFBEncryptor {
 }
 
 /// Streaming CFB decryptor.
+///
+/// Note: CFB streaming requires block-aligned chunks (16 bytes) for correctness
+/// when processing multiple chunks. Use one-shot decrypt() for arbitrary lengths.
 #[pyclass]
 struct TwofishCFBDecryptor {
     key: Vec<u8>,
@@ -747,6 +748,7 @@ struct TwofishCFBDecryptor {
 
 #[pymethods]
 impl TwofishCFBDecryptor {
+    /// Process data. For correct multi-chunk streaming, data must be block-aligned (16 bytes).
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         if self.finalized {
             return Err(PyRuntimeError::new_err("Decryptor already finalized"));
@@ -764,13 +766,9 @@ impl TwofishCFBDecryptor {
         let mut buffer = data.to_vec();
         cipher.decrypt(&mut buffer);
 
-        // Update IV with ciphertext
+        // Update feedback state with last ciphertext block
         if ct_for_iv.len() >= BLOCK_SIZE_BYTES {
             self.last_block = ct_for_iv[ct_for_iv.len() - BLOCK_SIZE_BYTES..].to_vec();
-        } else {
-            let shift = ct_for_iv.len();
-            self.last_block.drain(0..shift);
-            self.last_block.extend_from_slice(&ct_for_iv);
         }
 
         Ok(PyBytes::new(py, &buffer))
