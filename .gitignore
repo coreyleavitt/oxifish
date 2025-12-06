@@ -50,3 +50,4 @@ htmlcov/
 
 # maturin
 *.whl
+.hypothesis/

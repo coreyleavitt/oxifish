@@ -3,38 +3,106 @@
 import pytest
 from oxifish import (
     BLOCK_SIZE,
-    Padding,
+    BlockSize,
+    KeySize,
+    PaddingStyle,
     TwofishCBC,
     TwofishCFB,
     TwofishCTR,
     TwofishECB,
     TwofishOFB,
-    block_size,
+    pad,
+    unpad,
 )
 
 
-class TestBlockSize:
-    """Tests for block size constants."""
+class TestEnums:
+    """Tests for enum types."""
+
+    def test_block_size_enum(self) -> None:
+        """Test BlockSize enum values."""
+        assert BlockSize.BITS_128 == 16
+        assert int(BlockSize.BITS_128) == 16
+
+    def test_key_size_enum(self) -> None:
+        """Test KeySize enum values."""
+        assert KeySize.BITS_128 == 16
+        assert KeySize.BITS_192 == 24
+        assert KeySize.BITS_256 == 32
+
+    def test_padding_style_enum(self) -> None:
+        """Test PaddingStyle enum."""
+        assert str(PaddingStyle.Pkcs7) == "pkcs7"
+        assert str(PaddingStyle.Zeros) == "zeros"
+        assert str(PaddingStyle.Iso7816) == "iso7816"
+        assert str(PaddingStyle.AnsiX923) == "ansix923"
 
     def test_block_size_constant(self) -> None:
         """Test BLOCK_SIZE constant is 16."""
         assert BLOCK_SIZE == 16
 
-    def test_block_size_function(self) -> None:
-        """Test block_size() returns 16."""
-        assert block_size() == 16
-
 
 class TestPadding:
-    """Tests for Padding enum."""
+    """Tests for standalone padding functions."""
 
-    def test_padding_values(self) -> None:
-        """Test that all padding values are accessible."""
-        assert Padding.Pkcs7 is not None
-        assert Padding.NoPadding is not None
-        assert Padding.Zeros is not None
-        assert Padding.Iso7816 is not None
-        assert Padding.AnsiX923 is not None
+    def test_pkcs7_pad_unpad(self) -> None:
+        """Test PKCS7 padding roundtrip."""
+        data = b"Hello!"
+        padded = pad(data, 16, PaddingStyle.Pkcs7)
+        assert len(padded) == 16
+        unpadded = unpad(padded, 16, PaddingStyle.Pkcs7)
+        assert unpadded == data
+
+    def test_pkcs7_full_block_padding(self) -> None:
+        """Test PKCS7 adds full block when data is block-aligned."""
+        data = b"0123456789abcdef"  # Exactly 16 bytes
+        padded = pad(data, 16, PaddingStyle.Pkcs7)
+        assert len(padded) == 32  # Full block of padding added
+        unpadded = unpad(padded, 16, PaddingStyle.Pkcs7)
+        assert unpadded == data
+
+    def test_zeros_pad_unpad(self) -> None:
+        """Test zero padding roundtrip."""
+        data = b"Hello!"
+        padded = pad(data, 16, PaddingStyle.Zeros)
+        assert len(padded) == 16
+        unpadded = unpad(padded, 16, PaddingStyle.Zeros)
+        assert unpadded == data
+
+    def test_zeros_no_padding_when_aligned(self) -> None:
+        """Test zero padding adds nothing when block-aligned."""
+        data = b"0123456789abcdef"
+        padded = pad(data, 16, PaddingStyle.Zeros)
+        assert padded == data
+
+    def test_iso7816_pad_unpad(self) -> None:
+        """Test ISO 7816-4 padding roundtrip."""
+        data = b"Hello!"
+        padded = pad(data, 16, PaddingStyle.Iso7816)
+        assert len(padded) == 16
+        assert padded[6] == 0x80  # Marker byte
+        unpadded = unpad(padded, 16, PaddingStyle.Iso7816)
+        assert unpadded == data
+
+    def test_ansix923_pad_unpad(self) -> None:
+        """Test ANSI X9.23 padding roundtrip."""
+        data = b"Hello!"
+        padded = pad(data, 16, PaddingStyle.AnsiX923)
+        assert len(padded) == 16
+        assert padded[-1] == 10  # Padding length
+        unpadded = unpad(padded, 16, PaddingStyle.AnsiX923)
+        assert unpadded == data
+
+    def test_invalid_pkcs7_padding(self) -> None:
+        """Test that invalid PKCS7 padding raises error."""
+        invalid = b"Hello!\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05"
+        with pytest.raises(ValueError, match="Invalid PKCS7"):
+            unpad(invalid, 16, PaddingStyle.Pkcs7)
+
+    def test_empty_data_unpad_error(self) -> None:
+        """Test that unpadding empty data raises error."""
+        with pytest.raises(ValueError, match="Cannot unpad empty"):
+            unpad(b"", 16, PaddingStyle.Pkcs7)
 
 
 class TestTwofishECB:
@@ -52,6 +120,18 @@ class TestTwofishECB:
         for key_len in (0, 8, 15, 17, 31, 33, 64):
             with pytest.raises(ValueError, match="Key must be"):
                 TwofishECB(b"\x00" * key_len)
+
+    def test_block_size_property(self) -> None:
+        """Test block_size property."""
+        cipher = TwofishECB(b"\x00" * 16)
+        assert cipher.block_size == BlockSize.BITS_128
+        assert cipher.block_size == 16
+
+    def test_key_size_property(self) -> None:
+        """Test key_size property."""
+        assert TwofishECB(b"\x00" * 16).key_size == KeySize.BITS_128
+        assert TwofishECB(b"\x00" * 24).key_size == KeySize.BITS_192
+        assert TwofishECB(b"\x00" * 32).key_size == KeySize.BITS_256
 
     def test_encrypt_decrypt_roundtrip(self) -> None:
         """Test that encrypt/decrypt is reversible."""
@@ -76,8 +156,7 @@ class TestTwofishECB:
         with pytest.raises(ValueError, match="Block must be 16 bytes"):
             cipher.decrypt_block(b"too long for a block!!")
 
-    # Official Twofish test vectors from the specification
-    # https://www.schneier.com/academic/twofish/
+    # Official Twofish test vectors
     def test_vector_128bit_key(self) -> None:
         """Test against official 128-bit key test vector."""
         key = bytes.fromhex("00000000000000000000000000000000")
@@ -115,236 +194,132 @@ class TestTwofishECB:
 class TestTwofishCBC:
     """Tests for TwofishCBC class."""
 
-    def test_valid_key_and_iv(self) -> None:
-        """Test that valid key and IV are accepted."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        cipher = TwofishCBC(key, iv)
+    def test_valid_key(self) -> None:
+        """Test that valid keys are accepted."""
+        cipher = TwofishCBC(b"\x00" * 16)
         assert cipher is not None
+
+    def test_block_size_property(self) -> None:
+        """Test block_size property."""
+        cipher = TwofishCBC(b"\x00" * 16)
+        assert cipher.block_size == 16
+
+    def test_key_size_property(self) -> None:
+        """Test key_size property."""
+        assert TwofishCBC(b"\x00" * 16).key_size == KeySize.BITS_128
+        assert TwofishCBC(b"\x00" * 32).key_size == KeySize.BITS_256
 
     def test_invalid_iv_size(self) -> None:
         """Test that invalid IV sizes raise ValueError."""
-        key = b"\x00" * 16
+        cipher = TwofishCBC(b"\x00" * 16)
 
         with pytest.raises(ValueError, match="IV/nonce must be 16 bytes"):
-            TwofishCBC(key, b"\x00" * 8)
-
-        with pytest.raises(ValueError, match="IV/nonce must be 16 bytes"):
-            TwofishCBC(key, b"\x00" * 32)
+            cipher.encrypt(b"\x00" * 16, b"\x00" * 8)
 
     def test_encrypt_decrypt_roundtrip(self) -> None:
-        """Test CBC encrypt/decrypt roundtrip with default PKCS7 padding."""
+        """Test CBC encrypt/decrypt roundtrip."""
         key = b"0123456789abcdef"
         iv = b"fedcba9876543210"
         plaintext = b"Hello, World!"
 
-        cipher1 = TwofishCBC(key, iv)
-        ciphertext = cipher1.encrypt(plaintext)
+        cipher = TwofishCBC(key)
+        padded = pad(plaintext, 16, PaddingStyle.Pkcs7)
+        ciphertext = cipher.encrypt(padded, iv)
 
-        # Ciphertext should be padded to 16 bytes
         assert len(ciphertext) == 16
 
-        cipher2 = TwofishCBC(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
+        decrypted = cipher.decrypt(ciphertext, iv)
+        unpadded = unpad(decrypted, 16, PaddingStyle.Pkcs7)
 
-        assert decrypted == plaintext
+        assert unpadded == plaintext
 
     def test_encrypt_decrypt_multi_block(self) -> None:
         """Test CBC with multiple blocks."""
         key = b"\x00" * 32
         iv = b"\x00" * 16
-        plaintext = b"A" * 100  # Will pad to 112 bytes (7 blocks)
+        plaintext = b"A" * 100
 
-        cipher1 = TwofishCBC(key, iv)
-        ciphertext = cipher1.encrypt(plaintext)
+        cipher = TwofishCBC(key)
+        padded = pad(plaintext, 16, PaddingStyle.Pkcs7)
+        ciphertext = cipher.encrypt(padded, iv)
 
-        assert len(ciphertext) == 112
+        assert len(ciphertext) == 112  # 7 blocks
 
-        cipher2 = TwofishCBC(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
+        decrypted = cipher.decrypt(ciphertext, iv)
+        unpadded = unpad(decrypted, 16, PaddingStyle.Pkcs7)
 
-        assert decrypted == plaintext
+        assert unpadded == plaintext
 
-    def test_empty_plaintext(self) -> None:
-        """Test encrypting empty plaintext."""
-        key = b"\x00" * 16
+    def test_data_must_be_block_aligned(self) -> None:
+        """Test that non-aligned data raises error."""
+        cipher = TwofishCBC(b"\x00" * 16)
         iv = b"\x00" * 16
 
-        cipher1 = TwofishCBC(key, iv)
-        ciphertext = cipher1.encrypt(b"")
-
-        # Empty plaintext gets full block of padding
-        assert len(ciphertext) == 16
-
-        cipher2 = TwofishCBC(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
-
-        assert decrypted == b""
-
-    def test_invalid_ciphertext_length(self) -> None:
-        """Test that non-block-aligned ciphertext raises ValueError."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        cipher = TwofishCBC(key, iv)
-
-        with pytest.raises(ValueError, match="must be non-empty and multiple of 16"):
-            cipher.decrypt(b"not aligned")
-
-        with pytest.raises(ValueError, match="must be non-empty and multiple of 16"):
-            cipher.decrypt(b"")
+        with pytest.raises(ValueError, match="must be a multiple of 16"):
+            cipher.encrypt(b"not aligned", iv)
 
     def test_different_ivs_produce_different_ciphertext(self) -> None:
         """Test that different IVs produce different ciphertext."""
         key = b"\x00" * 16
-        plaintext = b"Same plaintext!!"
+        plaintext = pad(b"Same plaintext!!", 16)
 
-        cipher1 = TwofishCBC(key, b"\x00" * 16)
-        ciphertext1 = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishCBC(key, b"\xff" * 16)
-        ciphertext2 = cipher2.encrypt(plaintext)
+        cipher = TwofishCBC(key)
+        ciphertext1 = cipher.encrypt(plaintext, b"\x00" * 16)
+        ciphertext2 = cipher.encrypt(plaintext, b"\xff" * 16)
 
         assert ciphertext1 != ciphertext2
 
-    def test_different_keys_produce_different_ciphertext(self) -> None:
-        """Test that different keys produce different ciphertext."""
-        iv = b"\x00" * 16
-        plaintext = b"Same plaintext!!"
-
-        cipher1 = TwofishCBC(b"\x00" * 16, iv)
-        ciphertext1 = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishCBC(b"\xff" * 16, iv)
-        ciphertext2 = cipher2.encrypt(plaintext)
-
-        assert ciphertext1 != ciphertext2
-
-
-class TestCBCPaddingOptions:
-    """Tests for CBC mode with different padding options."""
-
-    def test_pkcs7_padding_roundtrip(self) -> None:
-        """Test PKCS7 padding roundtrip."""
+    def test_streaming_encryptor(self) -> None:
+        """Test streaming encryption."""
         key = b"\x00" * 16
         iv = b"\x00" * 16
-        plaintext = b"Hello!"
+        plaintext = b"A" * 32  # 2 blocks
 
-        cipher1 = TwofishCBC(key, iv, Padding.Pkcs7)
-        ciphertext = cipher1.encrypt(plaintext)
-        assert len(ciphertext) == 16
+        cipher = TwofishCBC(key)
 
-        cipher2 = TwofishCBC(key, iv, Padding.Pkcs7)
-        decrypted = cipher2.decrypt(ciphertext)
-        assert decrypted == plaintext
+        # Streaming
+        enc = cipher.encryptor(iv)
+        ct1 = enc.update(plaintext[:16])
+        ct2 = enc.update(plaintext[16:])
+        enc.finalize()
+        streaming_ct = ct1 + ct2
 
-    def test_no_padding_block_aligned(self) -> None:
-        """Test no padding with block-aligned data."""
+        # One-shot
+        oneshot_ct = cipher.encrypt(plaintext, iv)
+
+        assert streaming_ct == oneshot_ct
+
+    def test_streaming_decryptor(self) -> None:
+        """Test streaming decryption."""
         key = b"\x00" * 16
         iv = b"\x00" * 16
-        plaintext = b"Exactly16bytes!!"
-        assert len(plaintext) == 16
+        plaintext = b"A" * 32
 
-        cipher1 = TwofishCBC(key, iv, Padding.NoPadding)
-        ciphertext = cipher1.encrypt(plaintext)
-        assert len(ciphertext) == 16
+        cipher = TwofishCBC(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
 
-        cipher2 = TwofishCBC(key, iv, Padding.NoPadding)
-        decrypted = cipher2.decrypt(ciphertext)
-        assert decrypted == plaintext
+        # Streaming decrypt
+        dec = cipher.decryptor(iv)
+        pt1 = dec.update(ciphertext[:16])
+        pt2 = dec.update(ciphertext[16:])
+        dec.finalize()
 
-    def test_no_padding_unaligned_raises(self) -> None:
-        """Test that no padding with unaligned data raises ValueError."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        plaintext = b"Not aligned"
-
-        cipher = TwofishCBC(key, iv, Padding.NoPadding)
-        with pytest.raises(ValueError, match="must be a multiple of 16 bytes"):
-            cipher.encrypt(plaintext)
-
-    def test_zero_padding_roundtrip(self) -> None:
-        """Test zero padding roundtrip."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        # Use plaintext that doesn't end with zeros
-        plaintext = b"Hello!"
-
-        cipher1 = TwofishCBC(key, iv, Padding.Zeros)
-        ciphertext = cipher1.encrypt(plaintext)
-        assert len(ciphertext) == 16
-
-        cipher2 = TwofishCBC(key, iv, Padding.Zeros)
-        decrypted = cipher2.decrypt(ciphertext)
-        assert decrypted == plaintext
-
-    def test_iso7816_padding_roundtrip(self) -> None:
-        """Test ISO 7816-4 padding roundtrip."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        plaintext = b"Hello!"
-
-        cipher1 = TwofishCBC(key, iv, Padding.Iso7816)
-        ciphertext = cipher1.encrypt(plaintext)
-        assert len(ciphertext) == 16
-
-        cipher2 = TwofishCBC(key, iv, Padding.Iso7816)
-        decrypted = cipher2.decrypt(ciphertext)
-        assert decrypted == plaintext
-
-    def test_ansix923_padding_roundtrip(self) -> None:
-        """Test ANSI X9.23 padding roundtrip."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        plaintext = b"Hello!"
-
-        cipher1 = TwofishCBC(key, iv, Padding.AnsiX923)
-        ciphertext = cipher1.encrypt(plaintext)
-        assert len(ciphertext) == 16
-
-        cipher2 = TwofishCBC(key, iv, Padding.AnsiX923)
-        decrypted = cipher2.decrypt(ciphertext)
-        assert decrypted == plaintext
-
-    def test_pkcs7_padding_lengths(self) -> None:
-        """Test that PKCS7 padding produces correct lengths."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-
-        test_cases = [
-            (0, 16),  # Empty -> 16 bytes padding
-            (1, 16),  # 1 byte -> 15 bytes padding
-            (15, 16),  # 15 bytes -> 1 byte padding
-            (16, 32),  # 16 bytes -> 16 bytes padding (full block)
-            (17, 32),  # 17 bytes -> 15 bytes padding
-            (31, 32),  # 31 bytes -> 1 byte padding
-            (32, 48),  # 32 bytes -> 16 bytes padding (full block)
-        ]
-
-        for input_len, expected_output_len in test_cases:
-            cipher = TwofishCBC(key, iv, Padding.Pkcs7)
-            ciphertext = cipher.encrypt(b"x" * input_len)
-            assert len(ciphertext) == expected_output_len, (
-                f"Input {input_len} bytes should produce {expected_output_len} bytes, "
-                f"got {len(ciphertext)}"
-            )
+        assert pt1 + pt2 == plaintext
 
 
 class TestTwofishCTR:
     """Tests for TwofishCTR class."""
 
-    def test_valid_key_and_nonce(self) -> None:
-        """Test that valid key and nonce are accepted."""
-        key = b"\x00" * 16
-        nonce = b"\x00" * 16
-        cipher = TwofishCTR(key, nonce)
+    def test_valid_key(self) -> None:
+        """Test that valid keys are accepted."""
+        cipher = TwofishCTR(b"\x00" * 16)
         assert cipher is not None
 
-    def test_invalid_nonce_size(self) -> None:
-        """Test that invalid nonce sizes raise ValueError."""
-        key = b"\x00" * 16
-
-        with pytest.raises(ValueError, match="IV/nonce must be 16 bytes"):
-            TwofishCTR(key, b"\x00" * 8)
+    def test_properties(self) -> None:
+        """Test block_size and key_size properties."""
+        cipher = TwofishCTR(b"\x00" * 16)
+        assert cipher.block_size == 16
+        assert cipher.key_size == KeySize.BITS_128
 
     def test_encrypt_decrypt_roundtrip(self) -> None:
         """Test CTR encrypt/decrypt roundtrip."""
@@ -352,15 +327,13 @@ class TestTwofishCTR:
         nonce = b"fedcba9876543210"
         plaintext = b"Hello, World!"
 
-        cipher1 = TwofishCTR(key, nonce)
-        ciphertext = cipher1.encrypt(plaintext)
+        cipher = TwofishCTR(key)
+        ciphertext = cipher.encrypt(plaintext, nonce)
 
         # CTR mode: output same length as input
         assert len(ciphertext) == len(plaintext)
 
-        cipher2 = TwofishCTR(key, nonce)
-        decrypted = cipher2.decrypt(ciphertext)
-
+        decrypted = cipher.decrypt(ciphertext, nonce)
         assert decrypted == plaintext
 
     def test_no_padding_needed(self) -> None:
@@ -368,58 +341,55 @@ class TestTwofishCTR:
         key = b"\x00" * 16
         nonce = b"\x00" * 16
 
-        # Test various lengths that aren't block-aligned
+        cipher = TwofishCTR(key)
+
         for length in [1, 7, 15, 17, 100]:
             plaintext = b"x" * length
-
-            cipher1 = TwofishCTR(key, nonce)
-            ciphertext = cipher1.encrypt(plaintext)
+            ciphertext = cipher.encrypt(plaintext, nonce)
             assert len(ciphertext) == length
-
-            cipher2 = TwofishCTR(key, nonce)
-            decrypted = cipher2.decrypt(ciphertext)
+            decrypted = cipher.decrypt(ciphertext, nonce)
             assert decrypted == plaintext
-
-    def test_empty_plaintext(self) -> None:
-        """Test encrypting empty plaintext."""
-        key = b"\x00" * 16
-        nonce = b"\x00" * 16
-
-        cipher = TwofishCTR(key, nonce)
-        ciphertext = cipher.encrypt(b"")
-
-        assert ciphertext == b""
 
     def test_different_nonces_produce_different_ciphertext(self) -> None:
         """Test that different nonces produce different ciphertext."""
         key = b"\x00" * 16
         plaintext = b"Same plaintext!!"
 
-        cipher1 = TwofishCTR(key, b"\x00" * 16)
-        ciphertext1 = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishCTR(key, b"\xff" * 16)
-        ciphertext2 = cipher2.encrypt(plaintext)
+        cipher = TwofishCTR(key)
+        ciphertext1 = cipher.encrypt(plaintext, b"\x00" * 16)
+        ciphertext2 = cipher.encrypt(plaintext, b"\xff" * 16)
 
         assert ciphertext1 != ciphertext2
+
+    def test_streaming(self) -> None:
+        """Test streaming CTR mode."""
+        key = b"\x00" * 16
+        nonce = b"\x00" * 16
+        plaintext = b"Hello, World! This is a test."
+
+        cipher = TwofishCTR(key)
+
+        # Streaming
+        enc = cipher.encryptor(nonce)
+        ct1 = enc.update(plaintext[:10])
+        ct2 = enc.update(plaintext[10:20])
+        ct3 = enc.update(plaintext[20:])
+        enc.finalize()
+        streaming_ct = ct1 + ct2 + ct3
+
+        # One-shot
+        oneshot_ct = cipher.encrypt(plaintext, nonce)
+
+        assert streaming_ct == oneshot_ct
 
 
 class TestTwofishCFB:
     """Tests for TwofishCFB class."""
 
-    def test_valid_key_and_iv(self) -> None:
-        """Test that valid key and IV are accepted."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        cipher = TwofishCFB(key, iv)
+    def test_valid_key(self) -> None:
+        """Test that valid keys are accepted."""
+        cipher = TwofishCFB(b"\x00" * 16)
         assert cipher is not None
-
-    def test_invalid_iv_size(self) -> None:
-        """Test that invalid IV sizes raise ValueError."""
-        key = b"\x00" * 16
-
-        with pytest.raises(ValueError, match="IV/nonce must be 16 bytes"):
-            TwofishCFB(key, b"\x00" * 8)
 
     def test_encrypt_decrypt_roundtrip(self) -> None:
         """Test CFB encrypt/decrypt roundtrip."""
@@ -427,15 +397,12 @@ class TestTwofishCFB:
         iv = b"fedcba9876543210"
         plaintext = b"Hello, World!"
 
-        cipher1 = TwofishCFB(key, iv)
-        ciphertext = cipher1.encrypt(plaintext)
+        cipher = TwofishCFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
 
-        # CFB mode: output same length as input
         assert len(ciphertext) == len(plaintext)
 
-        cipher2 = TwofishCFB(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
-
+        decrypted = cipher.decrypt(ciphertext, iv)
         assert decrypted == plaintext
 
     def test_no_padding_needed(self) -> None:
@@ -443,57 +410,23 @@ class TestTwofishCFB:
         key = b"\x00" * 16
         iv = b"\x00" * 16
 
+        cipher = TwofishCFB(key)
+
         for length in [1, 7, 15, 17, 100]:
             plaintext = b"x" * length
-
-            cipher1 = TwofishCFB(key, iv)
-            ciphertext = cipher1.encrypt(plaintext)
+            ciphertext = cipher.encrypt(plaintext, iv)
             assert len(ciphertext) == length
-
-            cipher2 = TwofishCFB(key, iv)
-            decrypted = cipher2.decrypt(ciphertext)
+            decrypted = cipher.decrypt(ciphertext, iv)
             assert decrypted == plaintext
-
-    def test_empty_plaintext(self) -> None:
-        """Test encrypting empty plaintext."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-
-        cipher = TwofishCFB(key, iv)
-        ciphertext = cipher.encrypt(b"")
-
-        assert ciphertext == b""
-
-    def test_different_ivs_produce_different_ciphertext(self) -> None:
-        """Test that different IVs produce different ciphertext."""
-        key = b"\x00" * 16
-        plaintext = b"Same plaintext!!"
-
-        cipher1 = TwofishCFB(key, b"\x00" * 16)
-        ciphertext1 = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishCFB(key, b"\xff" * 16)
-        ciphertext2 = cipher2.encrypt(plaintext)
-
-        assert ciphertext1 != ciphertext2
 
 
 class TestTwofishOFB:
     """Tests for TwofishOFB class."""
 
-    def test_valid_key_and_iv(self) -> None:
-        """Test that valid key and IV are accepted."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-        cipher = TwofishOFB(key, iv)
+    def test_valid_key(self) -> None:
+        """Test that valid keys are accepted."""
+        cipher = TwofishOFB(b"\x00" * 16)
         assert cipher is not None
-
-    def test_invalid_iv_size(self) -> None:
-        """Test that invalid IV sizes raise ValueError."""
-        key = b"\x00" * 16
-
-        with pytest.raises(ValueError, match="IV/nonce must be 16 bytes"):
-            TwofishOFB(key, b"\x00" * 8)
 
     def test_encrypt_decrypt_roundtrip(self) -> None:
         """Test OFB encrypt/decrypt roundtrip."""
@@ -501,55 +434,13 @@ class TestTwofishOFB:
         iv = b"fedcba9876543210"
         plaintext = b"Hello, World!"
 
-        cipher1 = TwofishOFB(key, iv)
-        ciphertext = cipher1.encrypt(plaintext)
+        cipher = TwofishOFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
 
-        # OFB mode: output same length as input
         assert len(ciphertext) == len(plaintext)
 
-        cipher2 = TwofishOFB(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
-
+        decrypted = cipher.decrypt(ciphertext, iv)
         assert decrypted == plaintext
-
-    def test_no_padding_needed(self) -> None:
-        """Test that OFB mode doesn't require padding."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-
-        for length in [1, 7, 15, 17, 100]:
-            plaintext = b"x" * length
-
-            cipher1 = TwofishOFB(key, iv)
-            ciphertext = cipher1.encrypt(plaintext)
-            assert len(ciphertext) == length
-
-            cipher2 = TwofishOFB(key, iv)
-            decrypted = cipher2.decrypt(ciphertext)
-            assert decrypted == plaintext
-
-    def test_empty_plaintext(self) -> None:
-        """Test encrypting empty plaintext."""
-        key = b"\x00" * 16
-        iv = b"\x00" * 16
-
-        cipher = TwofishOFB(key, iv)
-        ciphertext = cipher.encrypt(b"")
-
-        assert ciphertext == b""
-
-    def test_different_ivs_produce_different_ciphertext(self) -> None:
-        """Test that different IVs produce different ciphertext."""
-        key = b"\x00" * 16
-        plaintext = b"Same plaintext!!"
-
-        cipher1 = TwofishOFB(key, b"\x00" * 16)
-        ciphertext1 = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishOFB(key, b"\xff" * 16)
-        ciphertext2 = cipher2.encrypt(plaintext)
-
-        assert ciphertext1 != ciphertext2
 
     def test_encrypt_decrypt_symmetry(self) -> None:
         """Test that encryption and decryption are the same operation in OFB mode."""
@@ -557,13 +448,10 @@ class TestTwofishOFB:
         iv = b"\x00" * 16
         plaintext = b"Test symmetry!"
 
-        cipher1 = TwofishOFB(key, iv)
-        result1 = cipher1.encrypt(plaintext)
+        cipher = TwofishOFB(key)
+        result1 = cipher.encrypt(plaintext, iv)
+        result2 = cipher.decrypt(plaintext, iv)
 
-        cipher2 = TwofishOFB(key, iv)
-        result2 = cipher2.decrypt(plaintext)
-
-        # In OFB mode, encrypt and decrypt should produce the same result
         assert result1 == result2
 
 
@@ -587,13 +475,11 @@ class TestAllKeyLengths:
         """Test CBC mode with various key lengths."""
         key = b"\x00" * key_len
         iv = b"\x00" * 16
-        plaintext = b"Test message"
+        plaintext = b"\x00" * 16  # Block aligned
 
-        cipher1 = TwofishCBC(key, iv)
-        ciphertext = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishCBC(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
+        cipher = TwofishCBC(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        decrypted = cipher.decrypt(ciphertext, iv)
 
         assert decrypted == plaintext
 
@@ -604,11 +490,9 @@ class TestAllKeyLengths:
         nonce = b"\x00" * 16
         plaintext = b"Test message"
 
-        cipher1 = TwofishCTR(key, nonce)
-        ciphertext = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishCTR(key, nonce)
-        decrypted = cipher2.decrypt(ciphertext)
+        cipher = TwofishCTR(key)
+        ciphertext = cipher.encrypt(plaintext, nonce)
+        decrypted = cipher.decrypt(ciphertext, nonce)
 
         assert decrypted == plaintext
 
@@ -619,11 +503,9 @@ class TestAllKeyLengths:
         iv = b"\x00" * 16
         plaintext = b"Test message"
 
-        cipher1 = TwofishCFB(key, iv)
-        ciphertext = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishCFB(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
+        cipher = TwofishCFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        decrypted = cipher.decrypt(ciphertext, iv)
 
         assert decrypted == plaintext
 
@@ -634,10 +516,8 @@ class TestAllKeyLengths:
         iv = b"\x00" * 16
         plaintext = b"Test message"
 
-        cipher1 = TwofishOFB(key, iv)
-        ciphertext = cipher1.encrypt(plaintext)
-
-        cipher2 = TwofishOFB(key, iv)
-        decrypted = cipher2.decrypt(ciphertext)
+        cipher = TwofishOFB(key)
+        ciphertext = cipher.encrypt(plaintext, iv)
+        decrypted = cipher.decrypt(ciphertext, iv)
 
         assert decrypted == plaintext

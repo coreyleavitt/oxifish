@@ -14,22 +14,46 @@ pip install oxifish
 
 ```python
 import secrets
-from oxifish import TwofishCBC, Padding
+from oxifish import TwofishCBC, pad, unpad, PaddingStyle
 
 key = secrets.token_bytes(16)  # 16, 24, or 32 bytes
 iv = secrets.token_bytes(16)   # MUST be unique per encryption
 
-# Encrypt (PKCS7 padding is the default)
-cipher = TwofishCBC(key, iv, Padding.Pkcs7)
-ciphertext = cipher.encrypt(b'Hello, World!')
+cipher = TwofishCBC(key)
 
-# Decrypt (new instance required - cipher is stateful)
-cipher = TwofishCBC(key, iv, Padding.Pkcs7)
-plaintext = cipher.decrypt(ciphertext)
+# Encrypt with PKCS7 padding
+plaintext = b'Hello, World!'
+padded = pad(plaintext, cipher.block_size, PaddingStyle.Pkcs7)
+ciphertext = cipher.encrypt(padded, iv)
+
+# Decrypt
+decrypted = cipher.decrypt(ciphertext, iv)
+result = unpad(decrypted, cipher.block_size, PaddingStyle.Pkcs7)
 # b'Hello, World!'
 
 # Store IV with ciphertext (IV is not secret)
 encrypted_message = iv + ciphertext
+```
+
+### Streaming API
+
+For processing large data or when you need incremental encryption:
+
+```python
+from oxifish import TwofishCBC, pad, PaddingStyle
+
+cipher = TwofishCBC(key)
+
+# Streaming encryption
+enc = cipher.encryptor(iv)
+ciphertext = enc.update(pad(chunk1, 16, PaddingStyle.Pkcs7))
+ciphertext += enc.update(pad(chunk2, 16, PaddingStyle.Pkcs7))
+ciphertext += enc.finalize()
+
+# Streaming decryption
+dec = cipher.decryptor(iv)
+plaintext = dec.update(ciphertext)
+plaintext += dec.finalize()
 ```
 
 ### CTR Mode (no padding needed)
@@ -41,11 +65,9 @@ from oxifish import TwofishCTR
 key = secrets.token_bytes(16)
 nonce = secrets.token_bytes(16)  # MUST be unique per encryption
 
-cipher = TwofishCTR(key, nonce)
-ciphertext = cipher.encrypt(b'any length data')
-
-cipher = TwofishCTR(key, nonce)
-plaintext = cipher.decrypt(ciphertext)
+cipher = TwofishCTR(key)
+ciphertext = cipher.encrypt(b'any length data', nonce)
+plaintext = cipher.decrypt(ciphertext, nonce)
 ```
 
 ### ECB Mode (single blocks only)
@@ -66,11 +88,20 @@ plaintext = cipher.decrypt_block(ciphertext)
 
 | Mode | Padding | Use Case |
 |------|---------|----------|
-| `TwofishCBC` | Required (Pkcs7, Zeros, Iso7816, AnsiX923, NoPadding) | General encryption |
+| `TwofishCBC` | Use `pad()`/`unpad()` | General encryption |
 | `TwofishCTR` | Not needed | Stream encryption |
 | `TwofishCFB` | Not needed | Stream encryption |
 | `TwofishOFB` | Not needed | Stream encryption |
 | `TwofishECB` | N/A (block-level) | Building blocks, compatibility |
+
+### Padding Styles
+
+Use the standalone `pad()` and `unpad()` functions with `PaddingStyle`:
+
+- `PaddingStyle.Pkcs7` - Standard PKCS#7 padding (recommended)
+- `PaddingStyle.Zeros` - Zero padding (cannot roundtrip data ending with zeros)
+- `PaddingStyle.Iso7816` - ISO/IEC 7816-4 padding
+- `PaddingStyle.AnsiX923` - ANSI X9.23 padding
 
 ## Security
 

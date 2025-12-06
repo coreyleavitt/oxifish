@@ -3,37 +3,36 @@
 This package provides Twofish encryption in multiple modes (ECB, CBC, CTR, CFB, OFB),
 wrapping the RustCrypto `twofish` crate via PyO3.
 
-Example:
+Example (one-shot with padding):
     >>> import secrets
-    >>> from oxifish import TwofishCBC, Padding
+    >>> from oxifish import TwofishCBC, pad, unpad, PaddingStyle
     >>> key = secrets.token_bytes(16)  # 16, 24, or 32 bytes
-    >>> iv = secrets.token_bytes(16)   # MUST be unique per encryption
-    >>> cipher = TwofishCBC(key, iv, Padding.Pkcs7)
-    >>> ciphertext = cipher.encrypt(b'Hello, World!')
+    >>> iv = secrets.token_bytes(16)   # Must be unique per encryption
+    >>> cipher = TwofishCBC(key)
+    >>> padded = pad(b'Hello, World!', cipher.block_size, PaddingStyle.Pkcs7)
+    >>> ciphertext = cipher.encrypt(padded, iv)
     >>> # Store IV with ciphertext (IV is not secret)
     >>> encrypted_message = iv + ciphertext
-    >>> # Decrypt (new instance required - cipher is stateful)
-    >>> cipher2 = TwofishCBC(key, iv, Padding.Pkcs7)
-    >>> plaintext = cipher2.decrypt(ciphertext)
+    >>> # Decrypt
+    >>> plaintext = unpad(cipher.decrypt(ciphertext, iv), cipher.block_size)
     >>> plaintext
     b'Hello, World!'
 
-IMPORTANT: IVs/nonces MUST be unique for each encryption with the same key.
-Reusing an IV with the same key completely breaks the security of CBC and CTR modes.
+Example (streaming):
+    >>> cipher = TwofishCBC(key)
+    >>> enc = cipher.encryptor(iv)
+    >>> ct = enc.update(pad(b'chunk1', 16)) + enc.update(pad(b'chunk2', 16)) + enc.finalize()
 
 Available Modes:
     - TwofishECB: Electronic Codebook (single block operations)
-    - TwofishCBC: Cipher Block Chaining (requires padding)
+    - TwofishCBC: Cipher Block Chaining (use with pad/unpad)
     - TwofishCTR: Counter mode (stream cipher, no padding needed)
     - TwofishCFB: Cipher Feedback (stream cipher, no padding needed)
     - TwofishOFB: Output Feedback (stream cipher, no padding needed)
 
-Padding Options (for CBC mode):
-    - Padding.Pkcs7: PKCS7 padding (default, most common)
-    - Padding.NoPadding: No padding (data must be block-aligned)
-    - Padding.Zeros: Zero padding (ambiguous if plaintext ends with zeros)
-    - Padding.Iso7816: ISO/IEC 7816-4 padding
-    - Padding.AnsiX923: ANSI X9.23 padding
+Padding:
+    Use pad() before encryption and unpad() after decryption for CBC mode.
+    Stream cipher modes (CTR, CFB, OFB) do not require padding.
 
 Security Note:
     The Twofish algorithm uses key-dependent S-boxes, which means this
@@ -44,25 +43,53 @@ Security Note:
 """
 
 from oxifish._oxifish import (
-    BLOCK_SIZE,
-    Padding,
-    TwofishCBC,
-    TwofishCFB,
-    TwofishCTR,
+    # Enums
+    BlockSize,
+    KeySize,
+    PaddingStyle,
+    # Cipher classes
     TwofishECB,
+    TwofishCBC,
+    TwofishCTR,
+    TwofishCFB,
     TwofishOFB,
-    block_size,
+    # Streaming cipher classes (returned by encryptor/decryptor methods)
+    TwofishCBCEncryptor,
+    TwofishCBCDecryptor,
+    TwofishCTRCipher,
+    TwofishCFBEncryptor,
+    TwofishCFBDecryptor,
+    TwofishOFBCipher,
+    # Padding functions
+    pad,
+    unpad,
+    # Constants
+    BLOCK_SIZE,
 )
 
 __all__ = [
-    "Padding",
+    # Enums
+    "BlockSize",
+    "KeySize",
+    "PaddingStyle",
+    # Cipher classes
     "TwofishECB",
     "TwofishCBC",
     "TwofishCTR",
     "TwofishCFB",
     "TwofishOFB",
+    # Streaming cipher classes
+    "TwofishCBCEncryptor",
+    "TwofishCBCDecryptor",
+    "TwofishCTRCipher",
+    "TwofishCFBEncryptor",
+    "TwofishCFBDecryptor",
+    "TwofishOFBCipher",
+    # Padding functions
+    "pad",
+    "unpad",
+    # Constants
     "BLOCK_SIZE",
-    "block_size",
 ]
 
 __version__ = "0.1.0"
