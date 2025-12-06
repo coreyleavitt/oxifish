@@ -104,7 +104,12 @@ impl PaddingStyle {
 ///     Padded data
 #[pyfunction]
 #[pyo3(signature = (data, block_size=16, style=PaddingStyle::Pkcs7))]
-fn pad<'py>(py: Python<'py>, data: &[u8], block_size: u8, style: PaddingStyle) -> PyResult<Bound<'py, PyBytes>> {
+fn pad<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    block_size: u8,
+    style: PaddingStyle,
+) -> PyResult<Bound<'py, PyBytes>> {
     if block_size == 0 {
         return Err(PyValueError::new_err("block_size must be at least 1"));
     }
@@ -118,7 +123,11 @@ fn pad<'py>(py: Python<'py>, data: &[u8], block_size: u8, style: PaddingStyle) -
             result
         }
         PaddingStyle::Zeros => {
-            let padding_len = if data.len() % bs == 0 { 0 } else { bs - (data.len() % bs) };
+            let padding_len = if data.len() % bs == 0 {
+                0
+            } else {
+                bs - (data.len() % bs)
+            };
             let mut result = data.to_vec();
             result.extend(std::iter::repeat(0u8).take(padding_len));
             result
@@ -156,7 +165,12 @@ fn pad<'py>(py: Python<'py>, data: &[u8], block_size: u8, style: PaddingStyle) -
 ///     ValueError: If padding is invalid
 #[pyfunction]
 #[pyo3(signature = (data, block_size=16, style=PaddingStyle::Pkcs7))]
-fn unpad<'py>(py: Python<'py>, data: &[u8], block_size: u8, style: PaddingStyle) -> PyResult<Bound<'py, PyBytes>> {
+fn unpad<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    block_size: u8,
+    style: PaddingStyle,
+) -> PyResult<Bound<'py, PyBytes>> {
     if block_size == 0 {
         return Err(PyValueError::new_err("block_size must be at least 1"));
     }
@@ -314,7 +328,8 @@ impl TwofishCBCEncryptor {
         if data.len() % BLOCK_SIZE_BYTES != 0 {
             return Err(PyValueError::new_err(format!(
                 "Data must be a multiple of {} bytes, got {}. Use pad() first.",
-                BLOCK_SIZE_BYTES, data.len()
+                BLOCK_SIZE_BYTES,
+                data.len()
             )));
         }
         if data.is_empty() {
@@ -380,7 +395,8 @@ impl TwofishCBCDecryptor {
         if data.len() % BLOCK_SIZE_BYTES != 0 {
             return Err(PyValueError::new_err(format!(
                 "Ciphertext must be a multiple of {} bytes, got {}",
-                BLOCK_SIZE_BYTES, data.len()
+                BLOCK_SIZE_BYTES,
+                data.len()
             )));
         }
         if data.is_empty() {
@@ -474,12 +490,18 @@ impl TwofishCBC {
     }
 
     /// Encrypt data (one-shot). Data must be block-aligned.
-    fn encrypt<'py>(&self, py: Python<'py>, data: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn encrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        iv: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         validate_iv_length(iv.len())?;
         if data.len() % BLOCK_SIZE_BYTES != 0 {
             return Err(PyValueError::new_err(format!(
                 "Data must be a multiple of {} bytes, got {}. Use pad() first.",
-                BLOCK_SIZE_BYTES, data.len()
+                BLOCK_SIZE_BYTES,
+                data.len()
             )));
         }
         if data.is_empty() {
@@ -498,12 +520,18 @@ impl TwofishCBC {
     }
 
     /// Decrypt data (one-shot). Use unpad() on result if padding was used.
-    fn decrypt<'py>(&self, py: Python<'py>, data: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn decrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        iv: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         validate_iv_length(iv.len())?;
         if data.is_empty() || data.len() % BLOCK_SIZE_BYTES != 0 {
             return Err(PyValueError::new_err(format!(
                 "Ciphertext must be non-empty and multiple of {} bytes, got {}",
-                BLOCK_SIZE_BYTES, data.len()
+                BLOCK_SIZE_BYTES,
+                data.len()
             )));
         }
 
@@ -645,7 +673,12 @@ impl TwofishCTR {
     }
 
     /// Encrypt data (one-shot).
-    fn encrypt<'py>(&self, py: Python<'py>, data: &[u8], nonce: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn encrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        nonce: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         validate_iv_length(nonce.len())?;
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
@@ -664,7 +697,12 @@ impl TwofishCTR {
     }
 
     /// Decrypt data (one-shot).
-    fn decrypt<'py>(&self, py: Python<'py>, data: &[u8], nonce: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn decrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        nonce: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         self.encrypt(py, data, nonce)
     }
 }
@@ -830,7 +868,12 @@ impl TwofishCFB {
         })
     }
 
-    fn encrypt<'py>(&self, py: Python<'py>, data: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn encrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        iv: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         validate_iv_length(iv.len())?;
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
@@ -845,7 +888,12 @@ impl TwofishCFB {
         Ok(PyBytes::new(py, &buffer))
     }
 
-    fn decrypt<'py>(&self, py: Python<'py>, data: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn decrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        iv: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         validate_iv_length(iv.len())?;
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
@@ -965,7 +1013,12 @@ impl TwofishOFB {
         self.encryptor(iv)
     }
 
-    fn encrypt<'py>(&self, py: Python<'py>, data: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn encrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        iv: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         validate_iv_length(iv.len())?;
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
@@ -983,7 +1036,12 @@ impl TwofishOFB {
         Ok(PyBytes::new(py, &buffer))
     }
 
-    fn decrypt<'py>(&self, py: Python<'py>, data: &[u8], iv: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn decrypt<'py>(
+        &self,
+        py: Python<'py>,
+        data: &[u8],
+        iv: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
         self.encrypt(py, data, iv)
     }
 }
