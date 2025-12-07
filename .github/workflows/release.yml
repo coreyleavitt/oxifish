@@ -97,10 +97,7 @@ jobs:
               -f encoding=base64 \
               --jq '.sha')
 
-            TREE_SHA=$(gh api repos/${{ github.repository }}/git/trees \
-              --raw-field base_tree="${{ github.sha }}" \
-              --raw-field 'tree=[{"path":"pyproject.toml","mode":"100644","type":"blob","sha":"'"$PYPROJECT_SHA"'"},{"path":"Cargo.toml","mode":"100644","type":"blob","sha":"'"$CARGO_SHA"'"}]' \
-              --jq '.sha')
+            TREE_SHA=$(echo '{"base_tree":"${{ github.sha }}","tree":[{"path":"pyproject.toml","mode":"100644","type":"blob","sha":"'"$PYPROJECT_SHA"'"},{"path":"Cargo.toml","mode":"100644","type":"blob","sha":"'"$CARGO_SHA"'"}]}' | gh api repos/${{ github.repository }}/git/trees --input - --jq '.sha')
 
             COMMIT_SHA=$(gh api repos/${{ github.repository }}/git/commits \
               -f message="Bump version to $VERSION [skip ci]" \
