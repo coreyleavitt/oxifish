@@ -109,30 +109,14 @@ class TwofishCBCEncryptor:
     """Streaming CBC encryptor. Obtain via TwofishCBC.encryptor()."""
 
     def update(self, data: bytes) -> bytes:
-        """Encrypt data. Data must be block-aligned (16 bytes).
-
-        Raises:
-            RuntimeError: If already finalized
-        """
-        ...
-
-    def finalize(self) -> bytes:
-        """Finalize encryption. Returns empty bytes."""
+        """Encrypt data. Data must be block-aligned (16 bytes)."""
         ...
 
 class TwofishCBCDecryptor:
     """Streaming CBC decryptor. Obtain via TwofishCBC.decryptor()."""
 
     def update(self, data: bytes) -> bytes:
-        """Decrypt data. Data must be block-aligned (16 bytes).
-
-        Raises:
-            RuntimeError: If already finalized
-        """
-        ...
-
-    def finalize(self) -> bytes:
-        """Finalize decryption. Returns empty bytes."""
+        """Decrypt data. Data must be block-aligned (16 bytes)."""
         ...
 
 class TwofishCBC:
@@ -210,15 +194,7 @@ class TwofishCTRCipher:
     """Streaming CTR cipher. Obtain via TwofishCTR.encryptor() or .decryptor()."""
 
     def update(self, data: bytes) -> bytes:
-        """Encrypt/decrypt data.
-
-        Raises:
-            RuntimeError: If already finalized
-        """
-        ...
-
-    def finalize(self) -> bytes:
-        """Finalize. Returns empty bytes."""
+        """Encrypt/decrypt data."""
         ...
 
 class TwofishCTR:
@@ -290,30 +266,14 @@ class TwofishCFBEncryptor:
     """Streaming CFB encryptor. Obtain via TwofishCFB.encryptor()."""
 
     def update(self, data: bytes) -> bytes:
-        """Encrypt data.
-
-        Raises:
-            RuntimeError: If already finalized
-        """
-        ...
-
-    def finalize(self) -> bytes:
-        """Finalize. Returns empty bytes."""
+        """Encrypt data."""
         ...
 
 class TwofishCFBDecryptor:
     """Streaming CFB decryptor. Obtain via TwofishCFB.decryptor()."""
 
     def update(self, data: bytes) -> bytes:
-        """Decrypt data.
-
-        Raises:
-            RuntimeError: If already finalized
-        """
-        ...
-
-    def finalize(self) -> bytes:
-        """Finalize. Returns empty bytes."""
+        """Decrypt data."""
         ...
 
 class TwofishCFB:
@@ -379,15 +339,7 @@ class TwofishOFBCipher:
     """Streaming OFB cipher. Obtain via TwofishOFB.encryptor() or .decryptor()."""
 
     def update(self, data: bytes) -> bytes:
-        """Encrypt/decrypt data.
-
-        Raises:
-            RuntimeError: If already finalized
-        """
-        ...
-
-    def finalize(self) -> bytes:
-        """Finalize. Returns empty bytes."""
+        """Encrypt/decrypt data."""
         ...
 
 class TwofishOFB:

@@ -23,4 +23,5 @@ COPY tests/ ./tests/
 
 # Install dev dependencies and build extension
 RUN uv sync --dev && \
+    uv run mypy tests/ --strict && \
     uv run pytest tests/ -v

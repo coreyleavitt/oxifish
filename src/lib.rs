@@ -286,6 +286,10 @@ impl TwofishECB {
         self.cipher.decrypt_block((&mut output).into());
         Ok(PyBytes::new(py, &output))
     }
+
+    fn __repr__(&self) -> String {
+        format!("<TwofishECB key_size={}>", self.key.len() * 8)
+    }
 }
 
 impl Drop for TwofishECB {
@@ -299,12 +303,18 @@ impl Drop for TwofishECB {
 // ============================================================================
 
 /// Streaming CBC encryptor.
+///
+/// Encrypts data in chunks. Each call to update() processes data and returns
+/// ciphertext. Data must be block-aligned (16 bytes). Use pad() before encrypting.
+///
+/// Example:
+///     enc = cipher.encryptor(iv)
+///     ct = enc.update(padded_data)
 #[pyclass]
 struct TwofishCBCEncryptor {
     key: Vec<u8>,
     iv: Vec<u8>,
     buffer: Vec<u8>,
-    finalized: bool,
 }
 
 #[pymethods]
@@ -312,9 +322,6 @@ impl TwofishCBCEncryptor {
     /// Process data and return ciphertext for complete blocks.
     /// Data must be block-aligned (multiple of 16 bytes).
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Encryptor already finalized"));
-        }
         if data.len() % BLOCK_SIZE_BYTES != 0 {
             return Err(PyValueError::new_err(format!(
                 "Data must be a multiple of {} bytes, got {}. Use pad() first.",
@@ -347,13 +354,8 @@ impl TwofishCBCEncryptor {
         Ok(PyBytes::new(py, &output))
     }
 
-    /// Finalize the encryptor. Returns empty bytes.
-    fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Encryptor already finalized"));
-        }
-        self.finalized = true;
-        Ok(PyBytes::new(py, &[]))
+    fn __repr__(&self) -> String {
+        "<TwofishCBCEncryptor>".to_string()
     }
 }
 
@@ -366,12 +368,18 @@ impl Drop for TwofishCBCEncryptor {
 }
 
 /// Streaming CBC decryptor.
+///
+/// Decrypts data in chunks. Each call to update() processes ciphertext and
+/// returns plaintext. Data must be block-aligned (16 bytes). Use unpad() after.
+///
+/// Example:
+///     dec = cipher.decryptor(iv)
+///     pt = unpad(dec.update(ciphertext))
 #[pyclass]
 struct TwofishCBCDecryptor {
     key: Vec<u8>,
     iv: Vec<u8>,
     last_block: Vec<u8>,
-    finalized: bool,
 }
 
 #[pymethods]
@@ -379,9 +387,6 @@ impl TwofishCBCDecryptor {
     /// Process ciphertext and return plaintext for complete blocks.
     /// Data must be block-aligned (multiple of 16 bytes).
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Decryptor already finalized"));
-        }
         if data.len() % BLOCK_SIZE_BYTES != 0 {
             return Err(PyValueError::new_err(format!(
                 "Ciphertext must be a multiple of {} bytes, got {}",
@@ -413,14 +418,8 @@ impl TwofishCBCDecryptor {
         Ok(PyBytes::new(py, &output))
     }
 
-    /// Finalize the decryptor. Returns empty bytes.
-    /// Use unpad() on the complete plaintext if padding was used.
-    fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Decryptor already finalized"));
-        }
-        self.finalized = true;
-        Ok(PyBytes::new(py, &[]))
+    fn __repr__(&self) -> String {
+        "<TwofishCBCDecryptor>".to_string()
     }
 }
 
@@ -464,7 +463,6 @@ impl TwofishCBC {
             key: self.key.clone(),
             iv: iv.to_vec(),
             buffer: Vec::new(),
-            finalized: false,
         })
     }
 
@@ -475,7 +473,6 @@ impl TwofishCBC {
             key: self.key.clone(),
             iv: iv.to_vec(),
             last_block: Vec::new(),
-            finalized: false,
         })
     }
 
@@ -535,6 +532,10 @@ impl TwofishCBC {
 
         Ok(PyBytes::new(py, &buffer))
     }
+
+    fn __repr__(&self) -> String {
+        format!("<TwofishCBC key_size={}>", self.key.len() * 8)
+    }
 }
 
 impl Drop for TwofishCBC {
@@ -547,22 +548,23 @@ impl Drop for TwofishCBC {
 // TwofishCTR and streaming
 // ============================================================================
 
-/// Streaming CTR encryptor/decryptor.
+/// Streaming CTR cipher.
 ///
-/// Stores the cipher state to provide O(1) streaming performance.
+/// Encrypts/decrypts data in chunks using counter mode. Each call to update()
+/// processes data of any length (no block alignment required).
+///
+/// Example:
+///     enc = cipher.encryptor(nonce)
+///     ct = enc.update(data)
 #[pyclass]
 struct TwofishCTRCipher {
     cipher: Option<TwofishCtr>,
-    finalized: bool,
 }
 
 #[pymethods]
 impl TwofishCTRCipher {
     /// Process data (works for both encryption and decryption).
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Cipher already finalized"));
-        }
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
         }
@@ -578,15 +580,8 @@ impl TwofishCTRCipher {
         Ok(PyBytes::new(py, &buffer))
     }
 
-    /// Finalize the cipher.
-    fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Cipher already finalized"));
-        }
-        self.finalized = true;
-        // Drop the cipher to release resources
-        self.cipher = None;
-        Ok(PyBytes::new(py, &[]))
+    fn __repr__(&self) -> String {
+        "<TwofishCTRCipher>".to_string()
     }
 }
 
@@ -629,7 +624,6 @@ impl TwofishCTR {
 
         Ok(TwofishCTRCipher {
             cipher: Some(cipher),
-            finalized: false,
         })
     }
 
@@ -671,6 +665,10 @@ impl TwofishCTR {
     ) -> PyResult<Bound<'py, PyBytes>> {
         self.encrypt(py, data, nonce)
     }
+
+    fn __repr__(&self) -> String {
+        format!("<TwofishCTR key_size={}>", self.key.len() * 8)
+    }
 }
 
 impl Drop for TwofishCTR {
@@ -685,22 +683,22 @@ impl Drop for TwofishCTR {
 
 /// Streaming CFB encryptor.
 ///
-/// Note: CFB streaming requires block-aligned chunks (16 bytes) for correctness
-/// when processing multiple chunks. Use one-shot encrypt() for arbitrary lengths.
+/// Encrypts data in chunks using cipher feedback mode. Streaming requires
+/// block-aligned chunks (16 bytes). Use one-shot encrypt() for arbitrary lengths.
+///
+/// Example:
+///     enc = cipher.encryptor(iv)
+///     ct = enc.update(block_aligned_data)
 #[pyclass]
 struct TwofishCFBEncryptor {
     key: Vec<u8>,
     last_block: Vec<u8>,
-    finalized: bool,
 }
 
 #[pymethods]
 impl TwofishCFBEncryptor {
     /// Process data. For correct multi-chunk streaming, data must be block-aligned (16 bytes).
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Encryptor already finalized"));
-        }
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
         }
@@ -719,12 +717,8 @@ impl TwofishCFBEncryptor {
         Ok(PyBytes::new(py, &buffer))
     }
 
-    fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Encryptor already finalized"));
-        }
-        self.finalized = true;
-        Ok(PyBytes::new(py, &[]))
+    fn __repr__(&self) -> String {
+        "<TwofishCFBEncryptor>".to_string()
     }
 }
 
@@ -737,22 +731,22 @@ impl Drop for TwofishCFBEncryptor {
 
 /// Streaming CFB decryptor.
 ///
-/// Note: CFB streaming requires block-aligned chunks (16 bytes) for correctness
-/// when processing multiple chunks. Use one-shot decrypt() for arbitrary lengths.
+/// Decrypts data in chunks using cipher feedback mode. Streaming requires
+/// block-aligned chunks (16 bytes). Use one-shot decrypt() for arbitrary lengths.
+///
+/// Example:
+///     dec = cipher.decryptor(iv)
+///     pt = dec.update(block_aligned_ciphertext)
 #[pyclass]
 struct TwofishCFBDecryptor {
     key: Vec<u8>,
     last_block: Vec<u8>,
-    finalized: bool,
 }
 
 #[pymethods]
 impl TwofishCFBDecryptor {
     /// Process data. For correct multi-chunk streaming, data must be block-aligned (16 bytes).
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Decryptor already finalized"));
-        }
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
         }
@@ -774,12 +768,8 @@ impl TwofishCFBDecryptor {
         Ok(PyBytes::new(py, &buffer))
     }
 
-    fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Decryptor already finalized"));
-        }
-        self.finalized = true;
-        Ok(PyBytes::new(py, &[]))
+    fn __repr__(&self) -> String {
+        "<TwofishCFBDecryptor>".to_string()
     }
 }
 
@@ -819,7 +809,6 @@ impl TwofishCFB {
         Ok(TwofishCFBEncryptor {
             key: self.key.clone(),
             last_block: iv.to_vec(),
-            finalized: false,
         })
     }
 
@@ -828,7 +817,6 @@ impl TwofishCFB {
         Ok(TwofishCFBDecryptor {
             key: self.key.clone(),
             last_block: iv.to_vec(),
-            finalized: false,
         })
     }
 
@@ -871,6 +859,10 @@ impl TwofishCFB {
 
         Ok(PyBytes::new(py, &buffer))
     }
+
+    fn __repr__(&self) -> String {
+        format!("<TwofishCFB key_size={}>", self.key.len() * 8)
+    }
 }
 
 impl Drop for TwofishCFB {
@@ -885,19 +877,20 @@ impl Drop for TwofishCFB {
 
 /// Streaming OFB cipher.
 ///
-/// Stores the cipher state to provide O(1) streaming performance.
+/// Encrypts/decrypts data in chunks using output feedback mode. Each call to
+/// update() processes data of any length (no block alignment required).
+///
+/// Example:
+///     enc = cipher.encryptor(iv)
+///     ct = enc.update(data)
 #[pyclass]
 struct TwofishOFBCipher {
     cipher: Option<TwofishOfb>,
-    finalized: bool,
 }
 
 #[pymethods]
 impl TwofishOFBCipher {
     fn update<'py>(&mut self, py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Cipher already finalized"));
-        }
         if data.is_empty() {
             return Ok(PyBytes::new(py, &[]));
         }
@@ -913,14 +906,8 @@ impl TwofishOFBCipher {
         Ok(PyBytes::new(py, &buffer))
     }
 
-    fn finalize<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        if self.finalized {
-            return Err(PyRuntimeError::new_err("Cipher already finalized"));
-        }
-        self.finalized = true;
-        // Drop the cipher to release resources
-        self.cipher = None;
-        Ok(PyBytes::new(py, &[]))
+    fn __repr__(&self) -> String {
+        "<TwofishOFBCipher>".to_string()
     }
 }
 
@@ -962,7 +949,6 @@ impl TwofishOFB {
 
         Ok(TwofishOFBCipher {
             cipher: Some(cipher),
-            finalized: false,
         })
     }
 
@@ -1001,6 +987,10 @@ impl TwofishOFB {
     ) -> PyResult<Bound<'py, PyBytes>> {
         self.encrypt(py, data, iv)
     }
+
+    fn __repr__(&self) -> String {
+        format!("<TwofishOFB key_size={}>", self.key.len() * 8)
+    }
 }
 
 impl Drop for TwofishOFB {
@@ -1013,6 +1003,7 @@ impl Drop for TwofishOFB {
 // Helper functions
 // ============================================================================
 
+#[inline]
 fn validate_key_length(len: usize) -> PyResult<()> {
     if len != 16 && len != 24 && len != 32 {
         return Err(PyValueError::new_err(format!(
@@ -1023,6 +1014,7 @@ fn validate_key_length(len: usize) -> PyResult<()> {
     Ok(())
 }
 
+#[inline]
 fn validate_iv_length(len: usize) -> PyResult<()> {
     if len != BLOCK_SIZE_BYTES {
         return Err(PyValueError::new_err(format!(

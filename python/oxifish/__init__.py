@@ -21,7 +21,7 @@ Example (one-shot with padding):
 Example (streaming):
     >>> cipher = TwofishCBC(key)
     >>> enc = cipher.encryptor(iv)
-    >>> ct = enc.update(pad(b'chunk1', 16)) + enc.update(pad(b'chunk2', 16)) + enc.finalize()
+    >>> ct = enc.update(pad(b'chunk1', 16)) + enc.update(pad(b'chunk2', 16))
 
 Available Modes:
     - TwofishECB: Electronic Codebook (single block operations)

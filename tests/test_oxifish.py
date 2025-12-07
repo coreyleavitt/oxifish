@@ -98,6 +98,20 @@ class TestPadding:
         with pytest.raises(ValueError, match="Invalid PKCS7"):
             unpad(invalid, 16, PaddingStyle.Pkcs7)
 
+    def test_invalid_iso7816_padding(self) -> None:
+        """Test that invalid ISO7816 padding raises error."""
+        # All zeros - no 0x80 marker
+        invalid = b"Hello!\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        with pytest.raises(ValueError, match="ISO 7816"):
+            unpad(invalid, 16, PaddingStyle.Iso7816)
+
+    def test_invalid_ansix923_padding(self) -> None:
+        """Test that invalid AnsiX923 padding raises error."""
+        # Non-zero bytes in padding area (should be zeros before length byte)
+        invalid = b"Hello!\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a"
+        with pytest.raises(ValueError, match="ANSI"):
+            unpad(invalid, 16, PaddingStyle.AnsiX923)
+
     def test_empty_data_unpad_error(self) -> None:
         """Test that unpadding empty data raises error."""
         with pytest.raises(ValueError, match="Cannot unpad empty"):
@@ -280,7 +294,6 @@ class TestTwofishCBC:
         enc = cipher.encryptor(iv)
         ct1 = enc.update(plaintext[:16])
         ct2 = enc.update(plaintext[16:])
-        enc.finalize()
         streaming_ct = ct1 + ct2
 
         # One-shot
@@ -301,7 +314,6 @@ class TestTwofishCBC:
         dec = cipher.decryptor(iv)
         pt1 = dec.update(ciphertext[:16])
         pt2 = dec.update(ciphertext[16:])
-        dec.finalize()
 
         assert pt1 + pt2 == plaintext
 
@@ -373,7 +385,6 @@ class TestTwofishCTR:
         ct1 = enc.update(plaintext[:10])
         ct2 = enc.update(plaintext[10:20])
         ct3 = enc.update(plaintext[20:])
-        enc.finalize()
         streaming_ct = ct1 + ct2 + ct3
 
         # One-shot
@@ -685,7 +696,6 @@ class TestStreamingCFB:
         enc = cipher.encryptor(iv)
         ct1 = enc.update(plaintext[:16])
         ct2 = enc.update(plaintext[16:])
-        enc.finalize()
         streaming_ct = ct1 + ct2
 
         # One-shot
@@ -706,7 +716,6 @@ class TestStreamingCFB:
         dec = cipher.decryptor(iv)
         pt1 = dec.update(ciphertext[:16])
         pt2 = dec.update(ciphertext[16:])
-        dec.finalize()
 
         assert pt1 + pt2 == plaintext
 
@@ -721,12 +730,10 @@ class TestStreamingCFB:
         # Stream encrypt with block-aligned chunks
         enc = cipher.encryptor(iv)
         ciphertext = enc.update(plaintext[:32]) + enc.update(plaintext[32:])
-        enc.finalize()
 
         # Stream decrypt with block-aligned chunks
         dec = cipher.decryptor(iv)
         decrypted = dec.update(ciphertext[:32]) + dec.update(ciphertext[32:])
-        dec.finalize()
 
         assert decrypted == plaintext
 
@@ -747,7 +754,6 @@ class TestStreamingOFB:
         ct1 = enc.update(plaintext[:10])
         ct2 = enc.update(plaintext[10:20])
         ct3 = enc.update(plaintext[20:])
-        enc.finalize()
         streaming_ct = ct1 + ct2 + ct3
 
         # One-shot
@@ -769,7 +775,6 @@ class TestStreamingOFB:
         pt1 = dec.update(ciphertext[:10])
         pt2 = dec.update(ciphertext[10:20])
         pt3 = dec.update(ciphertext[20:])
-        dec.finalize()
 
         assert pt1 + pt2 + pt3 == plaintext
 
@@ -783,117 +788,8 @@ class TestStreamingOFB:
 
         enc = cipher.encryptor(iv)
         result1 = enc.update(data)
-        enc.finalize()
 
         dec = cipher.decryptor(iv)
         result2 = dec.update(data)
-        dec.finalize()
 
         assert result1 == result2
-
-
-class TestStreamingErrorPaths:
-    """Tests for streaming cipher error conditions."""
-
-    def test_cbc_update_after_finalize(self) -> None:
-        """Test CBC encryptor raises error on update after finalize."""
-        cipher = TwofishCBC(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.update(b"\x00" * 16)
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.update(b"\x00" * 16)
-
-    def test_cbc_finalize_twice(self) -> None:
-        """Test CBC encryptor raises error on double finalize."""
-        cipher = TwofishCBC(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.finalize()
-
-    def test_cbc_decryptor_update_after_finalize(self) -> None:
-        """Test CBC decryptor raises error on update after finalize."""
-        cipher = TwofishCBC(b"\x00" * 16)
-        dec = cipher.decryptor(b"\x00" * 16)
-        dec.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            dec.update(b"\x00" * 16)
-
-    def test_ctr_update_after_finalize(self) -> None:
-        """Test CTR cipher raises error on update after finalize."""
-        cipher = TwofishCTR(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.update(b"test")
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.update(b"test")
-
-    def test_ctr_finalize_twice(self) -> None:
-        """Test CTR cipher raises error on double finalize."""
-        cipher = TwofishCTR(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.finalize()
-
-    def test_cfb_encryptor_update_after_finalize(self) -> None:
-        """Test CFB encryptor raises error on update after finalize."""
-        cipher = TwofishCFB(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.update(b"test")
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.update(b"test")
-
-    def test_cfb_encryptor_finalize_twice(self) -> None:
-        """Test CFB encryptor raises error on double finalize."""
-        cipher = TwofishCFB(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.finalize()
-
-    def test_cfb_decryptor_update_after_finalize(self) -> None:
-        """Test CFB decryptor raises error on update after finalize."""
-        cipher = TwofishCFB(b"\x00" * 16)
-        dec = cipher.decryptor(b"\x00" * 16)
-        dec.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            dec.update(b"test")
-
-    def test_ofb_update_after_finalize(self) -> None:
-        """Test OFB cipher raises error on update after finalize."""
-        cipher = TwofishOFB(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.update(b"test")
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.update(b"test")
-
-    def test_ofb_finalize_twice(self) -> None:
-        """Test OFB cipher raises error on double finalize."""
-        cipher = TwofishOFB(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.finalize()
-
-    def test_empty_update_after_finalize(self) -> None:
-        """Test that even empty update after finalize raises error."""
-        cipher = TwofishCTR(b"\x00" * 16)
-        enc = cipher.encryptor(b"\x00" * 16)
-        enc.finalize()
-
-        with pytest.raises(RuntimeError, match="already finalized"):
-            enc.update(b"")
