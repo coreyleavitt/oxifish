@@ -75,9 +75,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies and build
-        run: |
-          uv sync --dev
-          uv run maturin develop
+        run: uv sync --dev
 
       - name: Type check with mypy
         run: uv run mypy python/ tests/ --strict
