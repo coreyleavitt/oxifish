@@ -109,4 +109,6 @@ __all__ = [
     "BLOCK_SIZE",
 ]
 
-__version__ = "0.1.0"
+from importlib.metadata import version as _get_version
+
+__version__ = _get_version("oxifish")
