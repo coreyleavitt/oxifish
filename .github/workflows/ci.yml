@@ -10,6 +10,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  rust-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo test
+        run: cargo test
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -79,6 +93,9 @@ jobs:
 
       - name: Type check with mypy
         run: uv run mypy python/ tests/ --strict
+
+      - name: Check stub against compiled module with stubtest
+        run: uv run python -m mypy.stubtest oxifish
 
   security:
     runs-on: ubuntu-latest

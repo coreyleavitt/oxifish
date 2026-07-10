@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "oxifish"
-version = "0.1.1"
+version = "0.2.0"
 description = "Python bindings for the RustCrypto Twofish block cipher implementation"
 readme = "README.md"
 license = {text = "MIT"}
@@ -46,6 +46,12 @@ python_version = "3.11"
 strict = true
 warn_return_any = true
 
+# pykeepass (dev/test-only oracle, RFC 0001 slice 9) ships no py.typed
+# marker or stubs.
+[[tool.mypy.overrides]]
+module = "pykeepass.*"
+ignore_missing_imports = true
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -58,6 +64,7 @@ ignore = ["S101"]
 dev = [
     "hypothesis>=6.148.7",
     "mypy>=1.19.0",
+    "pykeepass>=4.1.1",
     "pytest>=9.0.1",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.8",
