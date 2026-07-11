@@ -43,13 +43,16 @@ Security Note:
     story.
 """
 
-from enum import StrEnum
+# enum/typing are imported as modules for StrEnum and NamedTuple: this
+# fully-annotated module doubles as its own stub, and binding those names
+# here (even underscore-aliased) fails stubtest wherever typeshed's
+# declaration and the runtime object disagree (NamedTuple is a class in
+# typeshed but a function at runtime; StrEnum._generate_next_value_ is a
+# staticmethod in typeshed but not on 3.11). stubtest skips foreign module
+# objects, so module-qualified access sidesteps the whole class of mismatch.
+import enum
+import typing
 from importlib.metadata import version as _get_version
-
-# NamedTuple is aliased private: this fully-annotated module doubles as its
-# own stub, and a public `oxifish.NamedTuple` re-export fails stubtest
-# (typeshed's NamedTuple is a class, the runtime object is a function).
-from typing import NamedTuple as _NamedTuple
 from typing import Self, TypeAlias, overload
 
 __version__ = _get_version("oxifish")
@@ -117,7 +120,7 @@ def _buffer_type_error_message(value: object, name: str) -> str:
     )
 
 
-class Mode(StrEnum):
+class Mode(enum.StrEnum):
     """Streaming/one-shot cipher mode selector.
 
     Deliberately excludes ECB: RFC 0001 keeps ECB reachable only via
@@ -133,7 +136,7 @@ class Mode(StrEnum):
     OFB = "ofb"
 
 
-class Padding(StrEnum):
+class Padding(enum.StrEnum):
     """Padding schemes for the new surface's block-mode sessions."""
 
     PKCS7 = "pkcs7"
@@ -143,7 +146,7 @@ class Padding(StrEnum):
     ZEROS = "zeros"
 
 
-class EncryptResult(_NamedTuple):
+class EncryptResult(typing.NamedTuple):
     """Return value of auto-IV `TwofishKey.encrypt()`: the IV and ciphertext
     that must travel together."""
 
