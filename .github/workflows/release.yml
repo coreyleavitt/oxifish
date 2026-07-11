@@ -95,8 +95,12 @@ jobs:
               -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)/\1-beta.\2/' \
               -e 's/\.dev([0-9]+)$/-dev.\1/')
 
-            # Update Cargo.toml
-            sed -i "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml
+            # Update Cargo.toml. -i.bak (attached suffix) is the portable
+            # in-place form: build-wheels runs this same line on macOS too,
+            # where BSD sed rejects GNU-style bare -i (it eats the script as
+            # the suffix and dies on "invalid command code C" -- caught by
+            # the first TestPyPI dry-run).
+            sed -i.bak "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml && rm Cargo.toml.bak
 
             # In-pipeline version assertion (RFC 0002 change 1 placement
             # (b)): this bump commit is [skip ci], so ci.yml's typecheck
@@ -215,7 +219,11 @@ jobs:
             -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)/\1-beta.\2/' \
             -e 's/\.dev([0-9]+)$/-dev.\1/')
 
-          sed -i "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml
+          # -i.bak (attached suffix) is the portable in-place form: build-wheels
+          # runs this on macOS too, where BSD sed rejects GNU-style bare -i
+          # (it eats the script as the suffix and dies on "invalid command
+          # code C" -- caught by the first TestPyPI dry-run).
+          sed -i.bak "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml && rm Cargo.toml.bak
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -298,7 +306,11 @@ jobs:
             -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)/\1-beta.\2/' \
             -e 's/\.dev([0-9]+)$/-dev.\1/')
 
-          sed -i "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml
+          # -i.bak (attached suffix) is the portable in-place form: build-wheels
+          # runs this on macOS too, where BSD sed rejects GNU-style bare -i
+          # (it eats the script as the suffix and dies on "invalid command
+          # code C" -- caught by the first TestPyPI dry-run).
+          sed -i.bak "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml && rm Cargo.toml.bak
 
       - name: Set dev version for TestPyPI (Windows)
         if: inputs.target == 'testpypi' && matrix.os == 'windows-latest'
