@@ -28,13 +28,13 @@ KEY_16 = bytes(range(16))
 KEY_24 = bytes(range(24))
 KEY_32 = bytes(range(32))
 
-ALL_PADDINGS = [
-    Padding.PKCS7,
-    Padding.ISO7816,
-    Padding.ANSIX923,
-    Padding.ZEROS,
-    Padding.NONE,
-]
+# RFC 0002 change 3: this was a hand-enumerated literal list, an
+# independent (and driftable) encoding of `Padding`'s value set on top of
+# the Rust match arms + error message. Every padding scheme round-trips
+# through ECB (unlike test_one_shot_cbc.py's CBC round-trip, whose
+# plaintext is deliberately unaligned and therefore excludes
+# `Padding.NONE`), so this is the unfiltered `list(Padding)`.
+ALL_PADDINGS = list(Padding)
 
 
 class TestFactoryConstruction:

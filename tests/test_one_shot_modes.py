@@ -36,8 +36,14 @@ KEY_24 = bytes(range(24))
 KEY_32 = bytes(range(32))
 IV = bytes(range(16, 32))
 
-STREAM_MODES = [Mode.CTR, Mode.CFB, Mode.OFB]
-ALL_MODES = [Mode.CBC, Mode.CTR, Mode.CFB, Mode.OFB]
+# RFC 0002 change 3: these were hand-enumerated literal lists, an
+# independent (and driftable) encoding of the `Mode` enum's value set on
+# top of the Rust match arms + error message. Both are now introspected
+# from `Mode` itself -- `STREAM_MODES` stays an *exclusion* (not
+# `list(Mode)`), since it's load-bearing for the padding-rejection tests
+# below, which must never include CBC (the one mode padding IS allowed on).
+STREAM_MODES = [m for m in Mode if m != Mode.CBC]
+ALL_MODES = list(Mode)
 
 
 class TestRoundTrip:

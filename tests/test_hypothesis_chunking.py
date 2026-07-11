@@ -66,9 +66,20 @@ from oxifish import Mode, Padding, TwofishKey, TwofishSession
 KEY = bytes(range(16))
 IV = bytes(range(16, 32))
 
-CBC_PADDINGS = [Padding.PKCS7, Padding.NONE, Padding.ISO7816, Padding.ANSIX923, Padding.ZEROS]
-ECB_PADDINGS = [Padding.PKCS7, Padding.NONE, Padding.ISO7816, Padding.ANSIX923, Padding.ZEROS]
-STREAM_MODES = [Mode.CTR, Mode.CFB, Mode.OFB]
+# RFC 0002 change 3: introspected from `Padding` rather than hand-enumerated
+# (see tests/test_ecb.py's ALL_PADDINGS comment for the general rationale).
+# Both CBC and ECB exercise every padding scheme here -- unlike
+# test_one_shot_cbc.py's CBC-only suite, this module's payload strategy
+# (`_payload_strategy`) already special-cases `Padding.NONE` to draw
+# block-aligned data, so there is no unaligned-plaintext reason to exclude
+# it -- so both are the unfiltered `list(Padding)`.
+CBC_PADDINGS = list(Padding)
+ECB_PADDINGS = list(Padding)
+# RFC 0002 change 3: introspected from `Mode` rather than hand-enumerated
+# (see tests/test_one_shot_modes.py's ALL_MODES/STREAM_MODES comment for
+# the full rationale); still an exclusion, not `list(Mode)`, since these
+# call sites are specifically about the three non-CBC modes.
+STREAM_MODES = [m for m in Mode if m != Mode.CBC]
 
 COMBO_BUDGET = settings(max_examples=25, deadline=None)
 

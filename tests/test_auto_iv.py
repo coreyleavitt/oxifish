@@ -30,7 +30,17 @@ from oxifish import EncryptResult, Mode, Padding, TwofishKey, TwofishSession
 KEY_16 = bytes(range(16))
 KEY_32 = bytes(range(32))
 
-IV_MODES = [Mode.CBC, Mode.CTR, Mode.CFB, Mode.OFB]
+# RFC 0002 change 3: introspected from `Mode` rather than hand-enumerated
+# (see tests/test_one_shot_modes.py's ALL_MODES/STREAM_MODES comment for the
+# general rationale). Every `Mode` member takes an IV today (ECB, the one
+# IV-less cipher mode, is deliberately excluded from `Mode` itself -- see
+# `Mode`'s docstring in python/oxifish/__init__.py -- and reachable only via
+# the separate `ecb_encryptor`/`ecb_decryptor` factories, which this module
+# does not test). If a future IV-less member ever joins `Mode`, this list
+# picking it up and the resulting round-trip/`.iv` tests failing loudly is
+# the desired behavior -- it forces an explicit decision here rather than
+# silently exempting the new member.
+IV_MODES = list(Mode)
 
 
 def _padding_for(mode: Mode) -> Padding | None:

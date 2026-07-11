@@ -32,8 +32,20 @@ KEY_24 = bytes(range(24))
 KEY_32 = bytes(range(32))
 IV = bytes(range(16, 32))
 
-IV_MODES = [Mode.CBC, Mode.CTR, Mode.CFB, Mode.OFB]
-STREAM_MODES = [Mode.CTR, Mode.CFB, Mode.OFB]
+# RFC 0002 change 3: introspected from `Mode` rather than hand-enumerated
+# (see tests/test_one_shot_modes.py's ALL_MODES/STREAM_MODES comment for the
+# general rationale). Every `Mode` member takes an IV today (ECB, the one
+# IV-less cipher mode, is deliberately excluded from `Mode` itself -- see
+# `Mode`'s docstring in python/oxifish/__init__.py -- and reachable only via
+# the separate `ecb_encryptor`/`ecb_decryptor` factories, which this module
+# covers separately in tests/test_ecb.py). If a future IV-less member ever
+# joins `Mode`, this list picking it up and the resulting `.iv`/round-trip
+# tests failing loudly is the desired behavior -- it forces an explicit
+# decision here rather than silently exempting the new member.
+IV_MODES = list(Mode)
+# Still an exclusion, not `list(Mode)`, since these call sites are
+# specifically about the three non-CBC modes.
+STREAM_MODES = [m for m in Mode if m != Mode.CBC]
 
 
 class TestFactoryConstruction:

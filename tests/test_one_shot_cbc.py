@@ -40,7 +40,14 @@ KEY_24 = bytes(range(24))
 KEY_32 = bytes(range(32))
 IV = bytes(range(16, 32))
 
-ALL_PADDINGS = [Padding.PKCS7, Padding.ISO7816, Padding.ANSIX923, Padding.ZEROS]
+# RFC 0002 change 3: introspected from `Padding` rather than hand-enumerated
+# (see tests/test_ecb.py's ALL_PADDINGS comment for the general rationale).
+# `Padding.NONE` stays excluded here specifically: `test_round_trips_for_
+# every_padding`'s plaintext (below) is deliberately block-unaligned to
+# exercise real padding, which `Padding.NONE` would reject with a
+# misaligned-data ValueError -- `Padding.NONE`'s round-trip is covered
+# separately by `test_round_trips_for_padding_none_with_aligned_data`.
+ALL_PADDINGS = [p for p in Padding if p != Padding.NONE]
 
 
 class TestRoundTrip:
