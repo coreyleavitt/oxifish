@@ -64,6 +64,7 @@ ignore = ["S101"]
 dev = [
     "hypothesis>=6.148.7",
     "mypy>=1.19.0",
+    "packaging>=25.0",
     "pykeepass>=4.1.1",
     "pytest>=9.0.1",
     "pytest-cov>=7.0.0",
