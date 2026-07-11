@@ -42,6 +42,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       commit_sha: ${{ steps.version.outputs.commit_sha }}
+      pushed: ${{ steps.version.outputs.pushed }}
     steps:
       - uses: actions/checkout@v4
 
@@ -81,8 +82,55 @@ jobs:
             VERSION=$(uv version --short)
             echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+            # Translate PEP 440 compact version to SemVer for Cargo.toml
+            # (cargo hard-rejects PEP 440 compact prerelease/dev suffixes,
+            # e.g. "0.2.1a1"). Chain verified in RFC 0002 section 1 /
+            # tests/test_toolchain_sync.py -- kept as a verbatim copy across
+            # all 3 sed sites (separate jobs on separate runners, no shared
+            # shell state); the unit tests extract and re-run this exact
+            # text to keep the copies honest.
+            SEMVER=$(echo "$VERSION" | sed -E \
+              -e 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)/\1-rc.\2/' \
+              -e 's/^([0-9]+\.[0-9]+\.[0-9]+)a([0-9]+)/\1-alpha.\2/' \
+              -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)/\1-beta.\2/' \
+              -e 's/\.dev([0-9]+)$/-dev.\1/')
+
             # Update Cargo.toml
-            sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+            sed -i "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml
+
+            # In-pipeline version assertion (RFC 0002 change 1 placement
+            # (b)): this bump commit is [skip ci], so ci.yml's typecheck
+            # copy of this check never runs on the commit it's meant to
+            # guard -- this is the only guard that runs where it matters.
+            # Runs in an ephemeral env (--no-project) so it doesn't require
+            # syncing/building the Rust extension in this job. `packaging`
+            # is pinned to the exact version locked in uv.lock (dev-group
+            # floor is >=25.0; 25.0 is what's actually locked) rather than
+            # left to float from PyPI -- this job has `contents: write` and
+            # an unpinned `--with` would let a new packaging release change
+            # behavior here with no review. `--python 3.11` pins the
+            # interpreter floor explicitly: the script uses tomllib
+            # (stdlib, >=3.11) and `--no-project` means pyproject.toml's
+            # requires-python is not consulted, so without this uv could
+            # pick any interpreter it finds.
+            uv run --with 'packaging==25.0' --python 3.11 --no-project python scripts/check_release_version.py \
+              "$VERSION" pyproject.toml Cargo.toml
+
+            # Refresh both lockfiles' own oxifish self-entry to match the
+            # bump (RFC 0002 change 6): `uv version --bump` rewrites
+            # uv.lock's oxifish entry but not the whole lockfile, and
+            # Cargo.toml's rewrite similarly leaves Cargo.lock stale --
+            # unrefreshed, both desync from slice 3's `--locked` gates on
+            # the very next main push.
+            uv lock
+
+            # GH ubuntu-latest runners ship Rust preinstalled, but this job
+            # (unlike ci.yml's rust-test job) has no Swatinem/rust-cache, so
+            # there is no primed offline registry index -- `--offline`
+            # would fail cold here. Runners have full internet access, and
+            # oxifish is a workspace member (not a registry fetch), so a
+            # plain, non-offline update only touches its own lock entry.
+            cargo update -p oxifish
 
             # Commit via API (signed)
             PYPROJECT_CONTENT=$(base64 -w 0 pyproject.toml)
@@ -97,7 +145,19 @@ jobs:
               -f encoding=base64 \
               --jq '.sha')
 
-            TREE_SHA=$(echo '{"base_tree":"${{ github.sha }}","tree":[{"path":"pyproject.toml","mode":"100644","type":"blob","sha":"'"$PYPROJECT_SHA"'"},{"path":"Cargo.toml","mode":"100644","type":"blob","sha":"'"$CARGO_SHA"'"}]}' | gh api repos/${{ github.repository }}/git/trees --input - --jq '.sha')
+            UV_LOCK_CONTENT=$(base64 -w 0 uv.lock)
+            UV_LOCK_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
+              -f content="$UV_LOCK_CONTENT" \
+              -f encoding=base64 \
+              --jq '.sha')
+
+            CARGO_LOCK_CONTENT=$(base64 -w 0 Cargo.lock)
+            CARGO_LOCK_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
+              -f content="$CARGO_LOCK_CONTENT" \
+              -f encoding=base64 \
+              --jq '.sha')
+
+            TREE_SHA=$(echo '{"base_tree":"${{ github.sha }}","tree":[{"path":"pyproject.toml","mode":"100644","type":"blob","sha":"'"$PYPROJECT_SHA"'"},{"path":"Cargo.toml","mode":"100644","type":"blob","sha":"'"$CARGO_SHA"'"},{"path":"uv.lock","mode":"100644","type":"blob","sha":"'"$UV_LOCK_SHA"'"},{"path":"Cargo.lock","mode":"100644","type":"blob","sha":"'"$CARGO_LOCK_SHA"'"}]}' | gh api repos/${{ github.repository }}/git/trees --input - --jq '.sha')
 
             COMMIT_SHA=$(gh api repos/${{ github.repository }}/git/commits \
               -f message="Bump version to $VERSION [skip ci]" \
@@ -109,7 +169,20 @@ jobs:
               -X PATCH \
               -f sha="$COMMIT_SHA"
 
+            # main is bumped as of the line above. `pushed` (not this
+            # step's/job's overall success) is release-failure-notice's
+            # signal that a push actually landed, because GITHUB_OUTPUT
+            # writes are flushed synchronously and stick as
+            # steps.<id>.outputs.* -- and therefore in prepare-version's
+            # job-level `outputs:` below, readable via needs.* -- even if
+            # something later in this step/job fails or the run is
+            # cancelled; only a job that never runs at all (skipped) yields
+            # empty needs.*.outputs downstream. commit_sha is written
+            # before pushed so that whenever a downstream job observes
+            # pushed=true it is guaranteed to also see a populated
+            # commit_sha.
             echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+            echo "pushed=true" >> $GITHUB_OUTPUT
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -132,7 +205,17 @@ jobs:
         run: |
           VERSION="${{ needs.prepare-version.outputs.version }}"
           uv version "$VERSION"
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+          # Translate PEP 440 compact version to SemVer for Cargo.toml (see
+          # prepare-version's identical chain / tests/test_toolchain_sync.py
+          # for the verified translation and self-sync proof).
+          SEMVER=$(echo "$VERSION" | sed -E \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)/\1-rc.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)a([0-9]+)/\1-alpha.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)/\1-beta.\2/' \
+            -e 's/\.dev([0-9]+)$/-dev.\1/')
+
+          sed -i "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -205,7 +288,17 @@ jobs:
         run: |
           VERSION="${{ needs.prepare-version.outputs.version }}"
           uv version "$VERSION"
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+          # Translate PEP 440 compact version to SemVer for Cargo.toml (see
+          # prepare-version's identical chain / tests/test_toolchain_sync.py
+          # for the verified translation and self-sync proof).
+          SEMVER=$(echo "$VERSION" | sed -E \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)/\1-rc.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)a([0-9]+)/\1-alpha.\2/' \
+            -e 's/^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)/\1-beta.\2/' \
+            -e 's/\.dev([0-9]+)$/-dev.\1/')
+
+          sed -i "s/^version = \".*\"/version = \"$SEMVER\"/" Cargo.toml
 
       - name: Set dev version for TestPyPI (Windows)
         if: inputs.target == 'testpypi' && matrix.os == 'windows-latest'
@@ -213,14 +306,49 @@ jobs:
         run: |
           $VERSION = "${{ needs.prepare-version.outputs.version }}"
           uv version $VERSION
-          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$VERSION`"" | Set-Content Cargo.toml
+
+          # PowerShell mirror of the bash sed chain above (see
+          # prepare-version / tests/test_toolchain_sync.py): -replace's
+          # replacement strings are single-quoted so PowerShell does not
+          # interpolate $1/$2 itself, leaving them as .NET regex
+          # backreferences. Same order (rc, then a, then b, then .dev)
+          # chained on the running $SEMVER value, mirroring the sed chain.
+          $SEMVER = $VERSION -replace '^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)', '$1-rc.$2'
+          $SEMVER = $SEMVER -replace '^([0-9]+\.[0-9]+\.[0-9]+)a([0-9]+)', '$1-alpha.$2'
+          $SEMVER = $SEMVER -replace '^([0-9]+\.[0-9]+\.[0-9]+)b([0-9]+)', '$1-beta.$2'
+          $SEMVER = $SEMVER -replace '\.dev([0-9]+)$', '-dev.$1'
+
+          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$SEMVER`"" | Set-Content Cargo.toml
+
+      # maturin-action's `--interpreter` build only finds interpreters it
+      # can locate itself: on Linux (manylinux/musllinux) that's the
+      # container's own /opt/python/* toolchains, unaffected by anything
+      # done on the host runner -- this step is a no-op there. On macOS
+      # and Windows the build runs directly on the host runner, where
+      # maturin looks for host-installed `pythonX.Y` (Unix) / `pyX.Y`
+      # launcher-visible (Windows) interpreters; without this step
+      # whatever CPython versions happen to be preinstalled on the runner
+      # image are all that's available, and CPython 3.14 availability on
+      # such preinstalled images is unconfirmed. Installed unconditionally
+      # (harmless on Linux, required on macOS/Windows) rather than gated
+      # by matrix.os, per maturin-action's own documented pattern of
+      # pairing actions/setup-python with --interpreter/--find-interpreter
+      # builds.
+      - name: Set up Python interpreters
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.11
+            3.12
+            3.13
+            3.14
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --out dist --interpreter 3.10 3.11 3.12 3.13
+          args: --release --out dist --interpreter 3.11 3.12 3.13 3.14
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -292,10 +420,117 @@ jobs:
       - name: Create release
         run: |
           VERSION="${{ needs.prepare-version.outputs.version }}"
+          TARGET="${{ needs.prepare-version.outputs.commit_sha }}"
           if echo "$VERSION" | grep -qE '(a|b|rc)[0-9]+'; then
-            gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes --prerelease
+            gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes --prerelease --target "$TARGET"
           else
-            gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes
+            gh release create "v$VERSION" dist/* --repo ${{ github.repository }} --generate-notes --target "$TARGET"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-failure-notice:
+    name: Release failure notice
+    # prepare-version pushes the version-bump commit straight to main (not
+    # via PR) before any wheel is built or anything is published. If a
+    # downstream job then fails, main is left permanently bumped with no
+    # matching PyPI release/tag and, without this job, no signal that
+    # happened. Lightest sound fix: an always()-guarded job that fires
+    # only when (a) prepare-version's push actually landed, and (b)
+    # something after prepare-version did not succeed. It only reports --
+    # it never writes to the repo. Auto-reverting main was considered and
+    # rejected: a revert commit racing a concurrent push to main is worse
+    # than a bumped-but-unreleased version number, and re-running the
+    # failed jobs (prepare-version's outputs and the uploaded artifacts
+    # stay valid) is always a safe, available fix.
+    #
+    # Gate is `needs.prepare-version.outputs.pushed == 'true'`, NOT
+    # `needs.prepare-version.result == 'success'`: the push happens
+    # mid-step (git ref PATCH, then `pushed=true` written to
+    # $GITHUB_OUTPUT -- see prepare-version), so a failure or cancellation
+    # in that same step *after* the PATCH, or in a hypothetical later step
+    # in that job, would still leave `result == 'success'` false while
+    # main was already bumped -- exactly the hole this job exists to
+    # close. `pushed` is only ever written after a successful PATCH, so it
+    # is a direct proxy for "did we mutate main" rather than "did the job
+    # end cleanly". Desk-checked (GH Actions docs don't spell this out
+    # verbatim; corroborated by GH Actions community guidance on
+    # surfacing state from a job that may fail, e.g.
+    # https://github.com/orgs/community/discussions/25388 and
+    # https://www.kenmuse.com/blog/how-to-handle-step-and-job-errors-in-github-actions/):
+    #   - GITHUB_OUTPUT writes are flushed synchronously as each line is
+    #     appended, so an output written before a later failure in the
+    #     same step is retained as steps.<id>.outputs.<name>, and in turn
+    #     in the job's own `outputs:` mapping.
+    #   - A job's `outputs:` remain populated for downstream `needs.*`
+    #     reads as long as the job actually ran and the underlying step
+    #     wrote them, regardless of whether the job's own `result` is
+    #     `success`, `failure`, or `cancelled`. Only a job that never runs
+    #     at all -- `result == 'skipped'` -- yields empty needs.*.outputs.
+    #     prepare-version has no `if:` of its own, so it always runs when
+    #     the workflow is dispatched; it is never skipped.
+    #   - Four scenarios re-checked against this gate:
+    #     1. testpypi run: the testpypi branch never runs the PATCH/echo
+    #        lines, so `pushed` is never set -> `''  == 'true'` is false ->
+    #        notice suppressed. (`inputs.target == 'pypi'` below is kept
+    #        as an explicit belt-and-suspenders clause, not load-bearing
+    #        for this scenario alone.)
+    #     2. pypi, full success: `pushed == 'true'` but all downstream
+    #        jobs succeeded -> the trailing `!= 'success'` OR-chain is
+    #        false -> notice suppressed.
+    #     3. pypi, prepare-version fails BEFORE the PATCH (e.g. the
+    #        version-assertion script or `uv lock` above it exits
+    #        non-zero): `pushed` is never written -> gate false -> notice
+    #        correctly suppressed, because main was never touched.
+    #     4. pypi, failure AFTER the PATCH anywhere (this step post-PATCH,
+    #        a hypothetical later step in prepare-version, or any
+    #        downstream job): `pushed == 'true'` and at least one
+    #        downstream job is not `success` -> notice fires, which is the
+    #        case this job exists for. Known residual gap, accepted: a
+    #        runner cancellation landing in the two-line window between
+    #        the PATCH returning and the `pushed=true` write leaves main
+    #        bumped with `pushed` unset, so the notice stays silent for
+    #        that sub-case -- far narrower than the whole-step/job blind
+    #        window the previous `result == 'success'` gate had, and not
+    #        closable from inside the step (no output can be written
+    #        earlier than the push it reports on).
+    #   - commit_sha is written before pushed in prepare-version (see that
+    #     step), so any run that reaches `pushed == 'true'` is guaranteed
+    #     to also have a populated commit_sha for the message below --
+    #     no empty-value fallback needed.
+    needs: [prepare-version, build-sdist, build-wheels, publish-pypi, create-release]
+    runs-on: ubuntu-latest
+    # This job only echoes and writes $GITHUB_STEP_SUMMARY -- it needs no
+    # repository permissions at all (needs.* outputs are workflow-engine
+    # context, not token-gated reads).
+    permissions: {}
+    if: |
+      always() &&
+      inputs.target == 'pypi' &&
+      needs.prepare-version.outputs.pushed == 'true' &&
+      (needs.build-sdist.result != 'success' ||
+       needs.build-wheels.result != 'success' ||
+       needs.publish-pypi.result != 'success' ||
+       needs.create-release.result != 'success')
+    steps:
+      - name: Report unreleased version bump on main
+        run: |
+          VERSION="${{ needs.prepare-version.outputs.version }}"
+          COMMIT_SHA="${{ needs.prepare-version.outputs.commit_sha }}"
+
+          echo "::error::Release pipeline failed after main was bumped to $VERSION (commit $COMMIT_SHA) with no release published -- see job summary for recovery options"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Release pipeline failed after main was bumped
+
+          \`main\` received a version-bump commit before a downstream job failed:
+
+          - **Version:** $VERSION
+          - **Commit:** $COMMIT_SHA
+          - **State:** main now declares this version, but no PyPI package and no GitHub Release exist for it.
+
+          ### Recovery options
+
+          1. **Re-run the failed jobs** from the Actions UI ("Re-run failed jobs"). \`prepare-version\`'s outputs (version, commit_sha) and the uploaded wheel/sdist artifacts remain valid, so a re-run resumes from where it broke without re-bumping.
+          2. **Acknowledge the skipped version number.** No action is required -- main stays at $VERSION and the next release simply bumps again from there. This workflow does not auto-revert main (a revert commit racing a concurrent push would be worse than a skipped version number).
+          EOF
