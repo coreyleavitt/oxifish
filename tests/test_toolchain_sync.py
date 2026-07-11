@@ -55,6 +55,7 @@ from __future__ import annotations
 import importlib.metadata
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -535,6 +536,14 @@ _TRANSLATOR_INPUT_SET = [
 ]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the sed chain only ever executes on Linux GHA runners "
+    "(prepare-version/build-sdist run on ubuntu; build-wheels' Windows leg "
+    "uses the PowerShell mirror) -- Windows sed variants mangle -E "
+    "backreferences and are not the environment under test; the ubuntu and "
+    "macos CI legs enforce this check",
+)
 class TestReleaseSemverTranslator:
     """release.yml's sed chain translates `uv version --short`'s
     PEP-440-compact output into Cargo-valid SemVer (RFC 0002 change 1's
