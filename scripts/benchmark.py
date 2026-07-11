@@ -29,6 +29,7 @@ import os
 import secrets
 import sys
 import time
+from collections.abc import Callable
 
 KEY = secrets.token_bytes(32)
 IV = secrets.token_bytes(16)
@@ -49,7 +50,7 @@ def mb_per_s(nbytes: int, reps: int, elapsed: float) -> float:
     return (total_bytes / (1024 * 1024)) / elapsed
 
 
-def timed(fn, reps: int) -> float:
+def timed(fn: Callable[[], None], reps: int) -> float:
     start = time.perf_counter()
     for _ in range(reps):
         fn()
@@ -135,7 +136,7 @@ def bench_new_api() -> list[tuple[str, str, float]]:
 
 
 def bench_old_api() -> list[tuple[str, str, float]]:
-    from oxifish import TwofishCBC
+    from oxifish import TwofishCBC  # type: ignore[attr-defined]
 
     cipher = TwofishCBC(KEY)
     rows: list[tuple[str, str, float]] = []

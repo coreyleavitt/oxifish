@@ -22,7 +22,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run cargo test
-        run: cargo test
+        run: cargo test --locked
 
   test:
     runs-on: ${{ matrix.os }}
@@ -42,10 +42,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --dev --python ${{ matrix.python-version }}
+        run: uv sync --locked --dev --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ --doctest-modules python/oxifish -v --hypothesis-profile=ci
 
   lint:
     runs-on: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
 
       - name: Clippy
         run: |
-          cargo clippy -- \
+          cargo clippy --locked -- \
             -D warnings \
             -A clippy::useless_conversion \
             -A clippy::manual_is_multiple_of \
@@ -72,10 +72,10 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Ruff check
-        run: uvx ruff check python/ tests/
+        run: uvx ruff check python/ tests/ scripts/
 
       - name: Ruff format check
-        run: uvx ruff format --check python/ tests/
+        run: uvx ruff format --check python/ tests/ scripts/
 
   typecheck:
     runs-on: ubuntu-latest
@@ -89,10 +89,13 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies and build
-        run: uv sync --dev
+        run: uv sync --locked --dev --reinstall-package oxifish
+
+      - name: Toolchain sync checks (version + Python-floor agreement)
+        run: uv run pytest tests/test_toolchain_sync.py
 
       - name: Type check with mypy
-        run: uv run mypy python/ tests/ --strict
+        run: uv run mypy python/ tests/ scripts/ --strict
 
       - name: Check stub against compiled module with stubtest
         run: uv run python -m mypy.stubtest oxifish
