@@ -24,7 +24,12 @@ one line:
 ```python
 from oxifish import TwofishKey
 
+derived_key = bytes(range(32))  # stand-in for a KeePass-derived key
 key = TwofishKey(derived_key)  # 16, 24, or 32 bytes
+
+# In real usage, `ciphertext` and `header_iv` come from the KDBX file --
+# synthesized here via a real encrypt() call so this block runs standalone.
+header_iv, ciphertext = key.encrypt(b"a secret message")
 plaintext = key.decrypt(ciphertext, iv=header_iv)  # PKCS7 padding by default
 ```
 
@@ -40,12 +45,19 @@ encrypted_message = iv + ciphertext
 ```
 
 Supplying your own IV returns bare ciphertext bytes instead (symmetric
-with `decrypt`):
+with `decrypt`). In practice "your own IV" comes from an existing source
+(e.g. a KDBX header) rather than being hand-generated — omitting `iv` and
+letting `encrypt` generate one already does that safely; this fence draws
+a fresh one only so it runs standalone:
 
 ```python
+import secrets
+
 from oxifish import Padding
 
-ct = key.encrypt(aligned_data, iv=iv, padding=Padding.NONE)
+aligned_data = bytes(range(32))  # Padding.NONE requires exact block multiples
+iv2 = secrets.token_bytes(16)  # a fresh IV -- never reuse `iv` from above
+ct = key.encrypt(aligned_data, iv=iv2, padding=Padding.NONE)
 ```
 
 ### Modes
@@ -82,11 +94,12 @@ raises `ValueError`, since there is nothing to pad.
 ```python
 from oxifish import Padding
 
-key.encrypt(data, iv=iv, padding=Padding.PKCS7)   # default for CBC
-key.encrypt(data, iv=iv, padding=Padding.NONE)    # data must already be block-aligned
-key.encrypt(data, iv=iv, padding=Padding.ISO7816)
-key.encrypt(data, iv=iv, padding=Padding.ANSIX923)
-key.encrypt(data, iv=iv, padding=Padding.ZEROS)   # ambiguous if plaintext ends in 0x00
+data = bytes(range(32))  # block-aligned so the Padding.NONE call below is valid too
+key.encrypt(data, padding=Padding.PKCS7)   # default for CBC; iv omitted -> fresh each call
+key.encrypt(data, padding=Padding.NONE)    # data must already be block-aligned
+key.encrypt(data, padding=Padding.ISO7816)
+key.encrypt(data, padding=Padding.ANSIX923)
+key.encrypt(data, padding=Padding.ZEROS)   # ambiguous if plaintext ends in 0x00
 ```
 
 ### Streaming
@@ -95,10 +108,12 @@ For processing data incrementally, open a session bound to one mode, one
 IV, and one padding policy:
 
 ```python
-enc = key.encryptor(Mode.CFB, iv=iv)
+chunk1, chunk2 = b"first chunk of ", b"the message"
+
+enc = key.encryptor(Mode.CFB)  # iv omitted -> fresh IV auto-generated, readable via enc.iv
 ciphertext = enc.update(chunk1) + enc.update(chunk2) + enc.finalize()
 
-dec = key.decryptor(Mode.CFB, iv=iv)
+dec = key.decryptor(Mode.CFB, iv=enc.iv)
 plaintext = dec.update(ciphertext) + dec.finalize()
 ```
 
@@ -116,6 +131,7 @@ own factories — never through `mode=`:
 ```python
 from oxifish import Padding
 
+block = bytes(range(16))  # ECB processes exactly one block here
 ciphertext = key.ecb_encryptor(padding=Padding.NONE).finalize(block)
 plaintext = key.ecb_decryptor(padding=Padding.NONE).finalize(ciphertext)
 ```
@@ -176,6 +192,9 @@ key/IV zeroization.
 Requires Rust and Python 3.11+.
 
 ```bash
+# Install Rust if you haven't
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
 # Install uv if you haven't
 curl -LsSf https://astral.sh/uv/install.sh | sh
 

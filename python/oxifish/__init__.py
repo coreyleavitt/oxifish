@@ -10,18 +10,27 @@ only via the dedicated `ecb_encryptor`/`ecb_decryptor` factories. See RFC
 rationale.
 
 Example (one-shot, the KeePass hot path -- IV lives in the KDBX header):
+    >>> derived_key = bytes(range(32))  # stand-in for a KeePass-derived key
     >>> key = TwofishKey(derived_key)
+    >>> # In real usage, `ciphertext`/`header_iv` come from the KDBX file --
+    >>> # synthesized here via a real encrypt() call so this example runs.
+    >>> header_iv, ciphertext = key.encrypt(b"a secret message")
     >>> plaintext = key.decrypt(ciphertext, iv=header_iv)  # PKCS7 default
 
 Example (one-shot, auto-generated IV):
     >>> iv, ciphertext = key.encrypt(plaintext)
-    >>> ct = key.encrypt(aligned, iv=iv, padding=Padding.NONE)
+    >>> aligned = bytes(range(16))  # Padding.NONE requires block-aligned data
+    >>> import secrets
+    >>> iv2 = secrets.token_bytes(16)  # a fresh IV -- never reuse `iv` from above
+    >>> ct = key.encrypt(aligned, iv=iv2, padding=Padding.NONE)
 
 Example (streaming):
-    >>> enc = key.encryptor(Mode.CFB, iv=iv)
+    >>> chunk_a, chunk_b = b"first chunk of ", b"the message"
+    >>> enc = key.encryptor(Mode.CFB)  # iv omitted -> fresh IV auto-generated
     >>> out = enc.update(chunk_a) + enc.update(chunk_b) + enc.finalize()
 
 Example (ECB, KAT/interop path -- single block only):
+    >>> block = bytes(range(16))  # exactly one block
     >>> block_ct = key.ecb_encryptor(padding=Padding.NONE).finalize(block)
 
 Security Note:
