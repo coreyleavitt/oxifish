@@ -395,16 +395,50 @@ enum ModeSelector {
 }
 
 impl ModeSelector {
+    /// The single catalog table for this type (RFC 0002 change 3): each
+    /// `(variant, catalog string)` pair appears exactly once, in the order
+    /// the `"expected one of '…'"` message lists them. [`ModeSelector::as_str`]
+    /// and [`parse_mode`] both derive from this table -- the match arms,
+    /// the valid set, and the error message text can no longer drift
+    /// independently because they are no longer three separate things.
+    const ALL: [(ModeSelector, &'static str); 4] = [
+        (ModeSelector::Cbc, "cbc"),
+        (ModeSelector::Ctr, "ctr"),
+        (ModeSelector::Cfb, "cfb"),
+        (ModeSelector::Ofb, "ofb"),
+    ];
+
     /// The catalog string for this mode -- used to echo the mode back in
     /// [`reject_stream_padding`]'s error message.
     fn as_str(self) -> &'static str {
-        match self {
-            ModeSelector::Cbc => "cbc",
-            ModeSelector::Ctr => "ctr",
-            ModeSelector::Cfb => "cfb",
-            ModeSelector::Ofb => "ofb",
-        }
+        Self::ALL
+            .iter()
+            .find(|(variant, _)| *variant == self)
+            .map(|(_, s)| *s)
+            .expect("every ModeSelector variant has an entry in ALL")
     }
+}
+
+/// Parse a catalog string against a `(variant, string)` table, producing
+/// either the matching variant or a `ValueError` naming the received value
+/// and the full valid set -- joined from the same table, in table order, so
+/// the message can never list a different set than the table actually
+/// accepts (RFC 0002 change 3). Shared by [`parse_mode`] and
+/// [`parse_padding`].
+#[inline]
+fn parse_catalog<T: Copy>(table: &[(T, &str)], kind: &str, value: &str) -> PyResult<T> {
+    table
+        .iter()
+        .find(|(_, s)| *s == value)
+        .map(|(variant, _)| *variant)
+        .ok_or_else(|| {
+            let valid = table
+                .iter()
+                .map(|(_, s)| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            PyValueError::new_err(format!("invalid {kind} '{value}': expected one of {valid}"))
+        })
 }
 
 /// Parse a `Mode` catalog string (already coerced from the Python facade's
@@ -415,19 +449,11 @@ impl ModeSelector {
 ///
 /// The literal string `"ecb"` is rejected here exactly like any other
 /// unrecognized value -- it gets no special carve-out beyond simply being
-/// absent from the match arms below, per the RFC's explicit callout that
+/// absent from [`ModeSelector::ALL`], per the RFC's explicit callout that
 /// `"ecb"` "is rejected... exactly like any unknown mode."
 #[inline]
 fn parse_mode(mode: &str) -> PyResult<ModeSelector> {
-    match mode {
-        "cbc" => Ok(ModeSelector::Cbc),
-        "ctr" => Ok(ModeSelector::Ctr),
-        "cfb" => Ok(ModeSelector::Cfb),
-        "ofb" => Ok(ModeSelector::Ofb),
-        _ => Err(PyValueError::new_err(format!(
-            "invalid mode '{mode}': expected one of 'cbc', 'ctr', 'cfb', 'ofb'"
-        ))),
-    }
+    parse_catalog(&ModeSelector::ALL, "mode", mode)
 }
 
 /// Reject an explicit `padding` argument on a stream mode (CTR/CFB/OFB).
@@ -450,24 +476,29 @@ fn reject_stream_padding(mode: ModeSelector, padding: Option<&str>) -> PyResult<
     }
 }
 
+/// The single catalog table for `engine::Padding` (RFC 0002 change 3), in
+/// the order the `"expected one of '…'"` message lists them. [`parse_padding`]
+/// is the table's only reader -- unlike [`ModeSelector`], nothing else in
+/// this crate needs a variant-to-string mapping for padding, so the table
+/// lives here rather than as an `impl` item on `engine::Padding`.
+const PADDING_TABLE: [(engine::Padding, &str); 5] = [
+    (engine::Padding::Pkcs7, "pkcs7"),
+    (engine::Padding::None, "none"),
+    (engine::Padding::Iso7816, "iso7816"),
+    (engine::Padding::AnsiX923, "ansix923"),
+    (engine::Padding::Zeros, "zeros"),
+];
+
 /// Parse a `Padding` catalog string (already coerced from the Python
 /// facade's `Padding | str | None` parameter) into the engine's enum.
 /// Exact, case-sensitive match, no trimming or normalization (RFC
 /// Contracts: "Mode/Padding strings match exactly"); an unrecognized
 /// value raises the catalog's `ValueError`, naming the received value and
-/// the full valid set.
+/// the full valid set -- joined from [`PADDING_TABLE`], so it can never
+/// list a different set than the table actually accepts.
 #[inline]
 fn parse_padding(padding: &str) -> PyResult<engine::Padding> {
-    match padding {
-        "pkcs7" => Ok(engine::Padding::Pkcs7),
-        "none" => Ok(engine::Padding::None),
-        "iso7816" => Ok(engine::Padding::Iso7816),
-        "ansix923" => Ok(engine::Padding::AnsiX923),
-        "zeros" => Ok(engine::Padding::Zeros),
-        _ => Err(PyValueError::new_err(format!(
-            "invalid padding '{padding}': expected one of 'pkcs7', 'none', 'iso7816', 'ansix923', 'zeros'"
-        ))),
-    }
+    parse_catalog(&PADDING_TABLE, "padding", padding)
 }
 
 /// Expand a raw key into a fresh `Twofish` schedule for one engine session.
