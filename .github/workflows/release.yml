@@ -265,8 +265,12 @@ jobs:
             os: ubuntu-latest
             target: aarch64
             manylinux: musllinux_1_2
+          # Cross-compiled from an Apple Silicon runner: macos-13 (the last
+          # Intel image) is retired -- jobs targeting it queue forever
+          # (observed on the first TestPyPI dry-run). maturin supports
+          # darwin cross-arch natively; the artifact is unchanged.
           - name: macOS x86_64 (Intel)
-            os: macos-13
+            os: macos-latest
             target: x86_64
             manylinux: auto
           - name: macOS aarch64 (Apple Silicon)
