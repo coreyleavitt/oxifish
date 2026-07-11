@@ -45,7 +45,12 @@ Security Note:
 
 from enum import StrEnum
 from importlib.metadata import version as _get_version
-from typing import NamedTuple, Self, TypeAlias, overload
+
+# NamedTuple is aliased private: this fully-annotated module doubles as its
+# own stub, and a public `oxifish.NamedTuple` re-export fails stubtest
+# (typeshed's NamedTuple is a class, the runtime object is a function).
+from typing import NamedTuple as _NamedTuple
+from typing import Self, TypeAlias, overload
 
 __version__ = _get_version("oxifish")
 
@@ -138,7 +143,7 @@ class Padding(StrEnum):
     ZEROS = "zeros"
 
 
-class EncryptResult(NamedTuple):
+class EncryptResult(_NamedTuple):
     """Return value of auto-IV `TwofishKey.encrypt()`: the IV and ciphertext
     that must travel together."""
 
