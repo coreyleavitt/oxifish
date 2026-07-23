@@ -136,30 +136,33 @@ jobs:
             # plain, non-offline update only touches its own lock entry.
             cargo update -p oxifish
 
-            # Commit via API (signed)
-            PYPROJECT_CONTENT=$(base64 -w 0 pyproject.toml)
-            PYPROJECT_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
-              -f content="$PYPROJECT_CONTENT" \
-              -f encoding=base64 \
-              --jq '.sha')
+            # Commit via API (signed). Blob payloads are streamed to `gh
+            # api` via stdin (`--input -`), never as `-f content=...`
+            # argv: Linux caps a single exec argument at MAX_ARG_STRLEN
+            # (128 KiB), and uv.lock's base64 crossed that once the
+            # lockfile passed ~96 KiB (caught live by the 0.3.0 release:
+            # "gh: Argument list too long", exit 126). jq -Rs wraps the
+            # base64 text as one JSON string; the trailing newline it
+            # captures is insignificant to base64 decoding.
+            PYPROJECT_SHA=$(base64 -w 0 pyproject.toml \
+              | jq -Rs '{encoding: "base64", content: .}' \
+              | gh api repos/${{ github.repository }}/git/blobs \
+                  --input - --jq '.sha')
 
-            CARGO_CONTENT=$(base64 -w 0 Cargo.toml)
-            CARGO_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
-              -f content="$CARGO_CONTENT" \
-              -f encoding=base64 \
-              --jq '.sha')
+            CARGO_SHA=$(base64 -w 0 Cargo.toml \
+              | jq -Rs '{encoding: "base64", content: .}' \
+              | gh api repos/${{ github.repository }}/git/blobs \
+                  --input - --jq '.sha')
 
-            UV_LOCK_CONTENT=$(base64 -w 0 uv.lock)
-            UV_LOCK_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
-              -f content="$UV_LOCK_CONTENT" \
-              -f encoding=base64 \
-              --jq '.sha')
+            UV_LOCK_SHA=$(base64 -w 0 uv.lock \
+              | jq -Rs '{encoding: "base64", content: .}' \
+              | gh api repos/${{ github.repository }}/git/blobs \
+                  --input - --jq '.sha')
 
-            CARGO_LOCK_CONTENT=$(base64 -w 0 Cargo.lock)
-            CARGO_LOCK_SHA=$(gh api repos/${{ github.repository }}/git/blobs \
-              -f content="$CARGO_LOCK_CONTENT" \
-              -f encoding=base64 \
-              --jq '.sha')
+            CARGO_LOCK_SHA=$(base64 -w 0 Cargo.lock \
+              | jq -Rs '{encoding: "base64", content: .}' \
+              | gh api repos/${{ github.repository }}/git/blobs \
+                  --input - --jq '.sha')
 
             TREE_SHA=$(echo '{"base_tree":"${{ github.sha }}","tree":[{"path":"pyproject.toml","mode":"100644","type":"blob","sha":"'"$PYPROJECT_SHA"'"},{"path":"Cargo.toml","mode":"100644","type":"blob","sha":"'"$CARGO_SHA"'"},{"path":"uv.lock","mode":"100644","type":"blob","sha":"'"$UV_LOCK_SHA"'"},{"path":"Cargo.lock","mode":"100644","type":"blob","sha":"'"$CARGO_LOCK_SHA"'"}]}' | gh api repos/${{ github.repository }}/git/trees --input - --jq '.sha')
 
