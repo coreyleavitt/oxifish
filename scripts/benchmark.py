@@ -6,6 +6,13 @@ lib.rs, benchmark vs 20% threshold"). Testing Strategy: "benchmark
 new-engine whole-message throughput vs. current on a 1-10 MB payload...
 threshold: within 20% of current throughput".
 
+RFC 0003 (docs/rfcs/0003-interop-breadth.md), Testing Strategy ("Benchmark
+rows") and slice 6: adds `TwofishXTS` and `ctr_width` rows, new-API only
+(neither construct exists on the old API baseline). These rows carry **no
+threshold gate** -- they are datapoints for the upstream RustCrypto perf
+conversation (see the RFC's Non-goals, "Upstream performance work"), not a
+pass/fail check.
+
 This script is deliberately API-agnostic at the call site: it detects
 whether the `oxifish` importable in the running interpreter is the new
 surface (`TwofishKey`/`Mode`) or the old one (`TwofishCBC`) and benchmarks
@@ -30,6 +37,7 @@ import secrets
 import sys
 import time
 from collections.abc import Callable
+from typing import Literal
 
 KEY = secrets.token_bytes(32)
 IV = secrets.token_bytes(16)
@@ -43,6 +51,29 @@ PAYLOADS = [
 ]
 
 STREAM_CHUNK = 64 * 1024  # aligned chunk size for streaming benchmarks
+
+# RFC 0003: CTR widths benchmarked alongside PAYLOADS above. 128 is today's
+# default (the pre-RFC-0003 behavior); 64/32 are the new narrower widths.
+CTR_WIDTHS: tuple[Literal[32, 64, 128], ...] = (128, 64, 32)
+
+# RFC 0003: TwofishXTS rows. `xts_key` below is a fresh random 64-byte
+# concatenated key (key1 || key2, the max 32-byte-per-half size) -- distinct
+# halves with overwhelming probability, satisfying the equal-halves guard.
+#
+# "512-byte data-unit loop": VeraCrypt's own fixed data-unit size, encrypted
+# as many independent one-shot calls (one per sector, each its own tweak) --
+# the realistic disk-encryption access pattern, not one big call. Sized to
+# ~100 KB total per rep for a direct comparison against the "100 KB"
+# PAYLOADS cell above.
+XTS_SECTOR_SIZE = 512
+XTS_SECTOR_COUNT = 200  # 200 * 512 B ~= 100 KB per rep
+XTS_SECTOR_REPS = 50
+
+# A single large data unit -- XTS's 2**20-block (16 MiB) ceiling comfortably
+# covers 10 MB in one call, for a direct comparison against the "10 MB"
+# PAYLOADS cell above.
+XTS_LARGE_UNIT_SIZE = 10 * 1024 * 1024
+XTS_LARGE_UNIT_REPS = 8
 
 
 def mb_per_s(nbytes: int, reps: int, elapsed: float) -> float:
@@ -58,7 +89,7 @@ def timed(fn: Callable[[], None], reps: int) -> float:
 
 
 def bench_new_api() -> list[tuple[str, str, float]]:
-    from oxifish import Mode, Padding, TwofishKey
+    from oxifish import Mode, Padding, TwofishKey, TwofishXTS
 
     key = TwofishKey(KEY)
     rows: list[tuple[str, str, float]] = []
@@ -131,6 +162,72 @@ def bench_new_api() -> list[tuple[str, str, float]]:
 
         t = timed(stream_decrypt_pkcs7, reps)
         rows.append(("stream dec pkcs7", label, mb_per_s(len(ct_padded), reps, t)))
+
+    # RFC 0003: ctr_width rows. One-shot only (CTR has no alignment/padding
+    # concern to also exercise via streaming, unlike the CBC rows above);
+    # width=128 is today's default CTR behavior, benchmarked here for the
+    # first time alongside the new 64/32 widths it sits next to.
+    for width in CTR_WIDTHS:
+        for label, size, reps in PAYLOADS:
+            data = secrets.token_bytes(size)
+            ct = key.encrypt(data, Mode.CTR, iv=IV, ctr_width=width)
+
+            def ctr_encrypt(data: bytes = data, width: Literal[32, 64, 128] = width) -> None:
+                key.encrypt(data, Mode.CTR, iv=IV, ctr_width=width)
+
+            def ctr_decrypt(ct: bytes = ct, width: Literal[32, 64, 128] = width) -> None:
+                key.decrypt(ct, Mode.CTR, iv=IV, ctr_width=width)
+
+            # A benchmark that measures the wrong output is worthless --
+            # verify the round trip once before timing it.
+            assert key.decrypt(ct, Mode.CTR, iv=IV, ctr_width=width) == data
+
+            t = timed(ctr_encrypt, reps)
+            rows.append((f"ctr encrypt w={width}", label, mb_per_s(size, reps, t)))
+
+            t = timed(ctr_decrypt, reps)
+            rows.append((f"ctr decrypt w={width}", label, mb_per_s(len(ct), reps, t)))
+
+    # RFC 0003: TwofishXTS rows (new-API only -- XTS does not exist on the
+    # old API baseline). Random 64-byte key -- distinct halves w.h.p.
+    xts_key = secrets.token_bytes(64)
+    xts = TwofishXTS(xts_key)
+
+    sectors = [secrets.token_bytes(XTS_SECTOR_SIZE) for _ in range(XTS_SECTOR_COUNT)]
+    sector_ct = [xts.encrypt(s, tweak=i) for i, s in enumerate(sectors)]
+    assert [xts.decrypt(c, tweak=i) for i, c in enumerate(sector_ct)] == sectors
+
+    def xts_encrypt_sectors() -> None:
+        for i, s in enumerate(sectors):
+            xts.encrypt(s, tweak=i)
+
+    def xts_decrypt_sectors() -> None:
+        for i, ct in enumerate(sector_ct):
+            xts.decrypt(ct, tweak=i)
+
+    total_sector_bytes = XTS_SECTOR_SIZE * XTS_SECTOR_COUNT
+
+    t = timed(xts_encrypt_sectors, XTS_SECTOR_REPS)
+    rows.append(("xts enc 512B", "100 KB", mb_per_s(total_sector_bytes, XTS_SECTOR_REPS, t)))
+
+    t = timed(xts_decrypt_sectors, XTS_SECTOR_REPS)
+    rows.append(("xts dec 512B", "100 KB", mb_per_s(total_sector_bytes, XTS_SECTOR_REPS, t)))
+
+    large_unit = secrets.token_bytes(XTS_LARGE_UNIT_SIZE)
+    large_unit_ct = xts.encrypt(large_unit, tweak=0)
+    assert xts.decrypt(large_unit_ct, tweak=0) == large_unit
+
+    def xts_encrypt_large() -> None:
+        xts.encrypt(large_unit, tweak=0)
+
+    def xts_decrypt_large() -> None:
+        xts.decrypt(large_unit_ct, tweak=0)
+
+    t = timed(xts_encrypt_large, XTS_LARGE_UNIT_REPS)
+    rows.append(("xts encrypt", "10 MB", mb_per_s(len(large_unit), XTS_LARGE_UNIT_REPS, t)))
+
+    t = timed(xts_decrypt_large, XTS_LARGE_UNIT_REPS)
+    rows.append(("xts decrypt", "10 MB", mb_per_s(len(large_unit_ct), XTS_LARGE_UNIT_REPS, t)))
 
     return rows
 

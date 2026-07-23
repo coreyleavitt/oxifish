@@ -102,21 +102,79 @@ class TwofishKey:
         `oxifish.TwofishKey.__new__` before reaching here."""
         ...
     def _encrypt_raw(
-        self, data: bytes, mode: str, iv: bytes | None, padding: str | None
+        self,
+        data: bytes,
+        mode: str,
+        iv: bytes | None,
+        padding: str | None,
+        ctr_width: int | None,
     ) -> tuple[bytes, bytes]:
         """Returns `(iv, ciphertext)`; `iv=None` auto-generates via the
-        OS CSPRNG. See `src/key.rs::TwofishKey::_encrypt_raw`."""
+        OS CSPRNG. `ctr_width` is `None` when `oxifish.TwofishKey.encrypt`'s
+        own `ctr_width` argument equals its default (128) -- see that
+        method's docstring. See `src/key.rs::TwofishKey::_encrypt_raw`."""
         ...
-    def _decrypt_raw(self, data: bytes, mode: str, iv: bytes, padding: str | None) -> bytes: ...
+    def _decrypt_raw(
+        self,
+        data: bytes,
+        mode: str,
+        iv: bytes,
+        padding: str | None,
+        ctr_width: int | None,
+    ) -> bytes: ...
     def _encryptor_raw(
-        self, mode: str, iv: bytes | None, padding: str | None
+        self,
+        mode: str,
+        iv: bytes | None,
+        padding: str | None,
+        ctr_width: int | None,
     ) -> TwofishSession: ...
-    def _decryptor_raw(self, mode: str, iv: bytes, padding: str | None) -> TwofishSession: ...
+    def _decryptor_raw(
+        self,
+        mode: str,
+        iv: bytes,
+        padding: str | None,
+        ctr_width: int | None,
+    ) -> TwofishSession: ...
     def _ecb_encryptor_raw(self, padding: str) -> TwofishSession: ...
     def _ecb_decryptor_raw(self, padding: str) -> TwofishSession: ...
+    def __repr__(self) -> str: ...
+
+@disjoint_base
+class TwofishXTS:
+    """Base pyclass for the XTS surface (`src/xts_py.rs`, RFC 0003 slice
+    4). `#[pyclass(subclass)]` in Rust, mirroring `TwofishKey`'s two-layer
+    split -- `oxifish.TwofishXTS` (`__init__.py`) subclasses this directly,
+    which is why this class is *not* `@final` (see `TwofishKey`'s own doc
+    re: `@disjoint_base`, which applies identically here). The `_*_raw`
+    methods below are this stub's true typed surface; the public,
+    `Buffer`-coercing/key-splitting/tweak-range-validating API (`encrypt`/
+    `decrypt`) lives entirely in `oxifish/__init__.py`.
+    """
+
+    @property
+    def key_size(self) -> int:
+        """TOTAL key size in bytes (32, 48, or 64) -- both halves combined,
+        matching `TwofishKey.key_size`'s total-bytes meaning."""
+        ...
+    def __new__(cls, key1: bytes, key2: bytes) -> Self:
+        """`key1`/`key2` are bytes-only at this boundary (PyO3's
+        `FromPyObject` for `&[u8]`) -- `oxifish.TwofishXTS.__new__` coerces
+        the wider `Buffer` union to `bytes`, splits it in half, and checks
+        the halves differ *before* reaching here (RFC §2: the equal-halves
+        guard is facade-only -- this constructor must accept equal
+        halves)."""
+        ...
+    def _encrypt_raw(self, data: bytes, tweak: int) -> bytes:
+        """`tweak` is the already-range-validated (`0 <= tweak < 2**128`)
+        data-unit number; `oxifish.TwofishXTS.encrypt` validates the range
+        itself so an out-of-range value never reaches here as PyO3's
+        generic `OverflowError`. See `src/xts_py.rs::TwofishXTS::_encrypt_raw`."""
+        ...
+    def _decrypt_raw(self, data: bytes, tweak: int) -> bytes: ...
     def __repr__(self) -> str: ...
 
 # PyO3 auto-populates `__all__` on the compiled module from its
 # `m.add_class`/`m.add` registrations (`src/lib.rs`'s `_oxifish` function)
 # -- declared here so `stubtest` can match it against the runtime value.
-__all__ = ["BLOCK_SIZE", "DecryptionError", "TwofishKey", "TwofishSession"]
+__all__ = ["BLOCK_SIZE", "DecryptionError", "TwofishKey", "TwofishSession", "TwofishXTS"]

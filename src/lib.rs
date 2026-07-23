@@ -20,12 +20,17 @@ mod engine;
 mod errors;
 mod key;
 mod session;
+// The XTS engine (RFC 0003 slice 3), now consumed by `xts_py`'s
+// `TwofishXTS` PyO3 surface (slice 4).
+mod xts;
+mod xts_py;
 
 use pyo3::prelude::*;
 
 use errors::DecryptionError;
 use key::TwofishKey;
 use session::TwofishSession;
+use xts_py::TwofishXTS;
 
 /// Block size in bytes, shared across `key` (IV validation/generation) and
 /// exposed to Python as `_oxifish.BLOCK_SIZE`.
@@ -39,6 +44,7 @@ pub(crate) const BLOCK_SIZE_BYTES: usize = 16;
 fn _oxifish(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TwofishKey>()?;
     m.add_class::<TwofishSession>()?;
+    m.add_class::<TwofishXTS>()?;
     m.add("DecryptionError", m.py().get_type::<DecryptionError>())?;
 
     m.add("BLOCK_SIZE", BLOCK_SIZE_BYTES)?;

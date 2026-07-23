@@ -112,6 +112,15 @@ impl TwofishKey {
     /// caller-supplied memory (RFC Concurrency contract). `iv_owned` and
     /// `mode` are plain owned/`Copy` values, not borrows into Python
     /// memory, so they cross the closure freely.
+    ///
+    /// `ctr_width` (RFC 0003 slice 5) is `None` when the Python facade's
+    /// own `ctr_width` argument equals its default (128) -- the facade
+    /// cannot distinguish "omitted" from "explicitly 128" (the pinned
+    /// public signature has no `None` case of its own), and the two are
+    /// behaviorally identical for every mode, so collapsing them onto the
+    /// same `None` here is exact, not an approximation.
+    /// [`TwofishKey::new_session`]'s single call to [`parse_ctr_width`] is
+    /// the only place this value is validated and dispatched onto mode.
     fn _encrypt_raw<'py>(
         &self,
         py: Python<'py>,
@@ -119,10 +128,12 @@ impl TwofishKey {
         mode: &str,
         iv: Option<&[u8]>,
         padding: Option<&str>,
+        ctr_width: Option<u32>,
     ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
         let iv_owned = resolve_iv(iv)?;
         let mode = parse_mode(mode)?;
-        let mut session = self.new_session(Direction::Encrypt, mode, &iv_owned, padding)?;
+        let mut session =
+            self.new_session(Direction::Encrypt, mode, &iv_owned, padding, ctr_width)?;
         let owned_data = data.to_vec();
         let output = py
             .detach(|| session.close_out(&owned_data))
@@ -150,10 +161,12 @@ impl TwofishKey {
         mode: &str,
         iv: &[u8],
         padding: Option<&str>,
+        ctr_width: Option<u32>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         validate_iv_length(iv.len())?;
         let mode = parse_mode(mode)?;
-        let mut session = self.new_session(Direction::Decrypt, mode, &iv_array(iv), padding)?;
+        let mut session =
+            self.new_session(Direction::Decrypt, mode, &iv_array(iv), padding, ctr_width)?;
         let owned_data = data.to_vec();
         let output = py
             .detach(|| session.close_out(&owned_data))
@@ -185,10 +198,11 @@ impl TwofishKey {
         mode: &str,
         iv: Option<&[u8]>,
         padding: Option<&str>,
+        ctr_width: Option<u32>,
     ) -> PyResult<TwofishSession> {
         let iv_owned = resolve_iv(iv)?;
         let mode = parse_mode(mode)?;
-        let session = self.new_session(Direction::Encrypt, mode, &iv_owned, padding)?;
+        let session = self.new_session(Direction::Encrypt, mode, &iv_owned, padding, ctr_width)?;
         Ok(TwofishSession {
             session,
             mode: mode.as_str(),
@@ -207,10 +221,12 @@ impl TwofishKey {
         mode: &str,
         iv: &[u8],
         padding: Option<&str>,
+        ctr_width: Option<u32>,
     ) -> PyResult<TwofishSession> {
         validate_iv_length(iv.len())?;
         let mode = parse_mode(mode)?;
-        let session = self.new_session(Direction::Decrypt, mode, &iv_array(iv), padding)?;
+        let session =
+            self.new_session(Direction::Decrypt, mode, &iv_array(iv), padding, ctr_width)?;
         Ok(TwofishSession {
             session,
             mode: mode.as_str(),
@@ -264,15 +280,26 @@ impl TwofishKey {
     /// the RFC's stated CBC default); the three stream modes reject any
     /// explicit `padding` via [`reject_stream_padding`] and otherwise
     /// carry none.
+    ///
+    /// `ctr_width` (RFC 0003 slice 5) is parsed via [`parse_ctr_width`] in
+    /// *every* arm, not just `Ctr`'s -- that single call site is where an
+    /// out-of-catalog width (e.g. `Some(999)`) raises regardless of mode,
+    /// and where a valid-but-inapplicable width (e.g. `Some(64)` on
+    /// `Cbc`) raises the mode-mismatch string, voice-parallel to
+    /// [`reject_stream_padding`]. Every non-`Ctr` arm discards the
+    /// returned (irrelevant) [`engine::CtrWidth`] -- `parse_ctr_width`'s
+    /// `Err` path already did the only work that matters there.
     fn new_session(
         &self,
         direction: Direction,
         mode: ModeSelector,
         iv: &[u8; BLOCK_SIZE_BYTES],
         padding: Option<&str>,
+        ctr_width: Option<u32>,
     ) -> PyResult<engine::Session> {
         Ok(match mode {
             ModeSelector::Cbc => {
+                parse_ctr_width(ctr_width, mode)?;
                 let padding = parse_padding(padding.unwrap_or("pkcs7"))?;
                 let cipher = (*self.cipher).clone();
                 match direction {
@@ -282,14 +309,16 @@ impl TwofishKey {
             }
             ModeSelector::Ctr => {
                 reject_stream_padding(mode, padding)?;
+                let width = parse_ctr_width(ctr_width, mode)?;
                 let cipher = (*self.cipher).clone();
                 match direction {
-                    Direction::Encrypt => engine::Session::ctr_encryptor(cipher, iv),
-                    Direction::Decrypt => engine::Session::ctr_decryptor(cipher, iv),
+                    Direction::Encrypt => engine::Session::ctr_encryptor(cipher, iv, width),
+                    Direction::Decrypt => engine::Session::ctr_decryptor(cipher, iv, width),
                 }
             }
             ModeSelector::Cfb => {
                 reject_stream_padding(mode, padding)?;
+                parse_ctr_width(ctr_width, mode)?;
                 let cipher = (*self.cipher).clone();
                 match direction {
                     Direction::Encrypt => engine::Session::cfb_encryptor(cipher, iv),
@@ -298,6 +327,7 @@ impl TwofishKey {
             }
             ModeSelector::Ofb => {
                 reject_stream_padding(mode, padding)?;
+                parse_ctr_width(ctr_width, mode)?;
                 let cipher = (*self.cipher).clone();
                 match direction {
                     Direction::Encrypt => engine::Session::ofb_encryptor(cipher, iv),
@@ -476,6 +506,72 @@ fn reject_stream_padding(mode: ModeSelector, padding: Option<&str>) -> PyResult<
     }
 }
 
+/// Parse and dispatch the new surface's `ctr_width` argument (RFC 0003
+/// §3), the single place `ctr_width` is validated -- shared by every arm
+/// of [`TwofishKey::new_session`], not just `Ctr`'s, so an invalid width
+/// is rejected regardless of `mode`, and a valid-but-inapplicable width is
+/// rejected with the mode-mismatch string voice-parallel to
+/// [`reject_stream_padding`].
+///
+/// `None` (the Python facade's "omitted, or explicitly the CTR default
+/// 128" collapse -- see `TwofishKey::_encrypt_raw`'s docs) always passes,
+/// for every mode: it means "nothing to validate against this mode,"
+/// resolving to [`engine::CtrWidth::W128`] when `mode` turns out to be
+/// `Ctr` (matching CTR's own pre-RFC-0003 default width).
+///
+/// `Some(width)` is checked in two independent steps, in this order:
+/// first, `width` must be a catalog member (32/64/128) -- checked before
+/// `mode` is even consulted, so an invalid width is reported as such
+/// regardless of mode; second, only `Ctr` may actually receive a `Some`
+/// width at all -- every other mode rejects it outright, exactly like
+/// [`reject_stream_padding`] rejects any explicit `padding`.
+#[inline]
+fn parse_ctr_width(ctr_width: Option<u32>, mode: ModeSelector) -> PyResult<engine::CtrWidth> {
+    ctr_width_for_mode(ctr_width, mode).map_err(PyValueError::new_err)
+}
+
+/// Pure-Rust core of [`parse_ctr_width`], split out (code-review finding
+/// L8) so its two-step ordering -- catalog membership checked *before*
+/// mode applicability, per [`parse_ctr_width`]'s own docs -- can be pinned
+/// by a `cargo test` asserting on the returned `String` directly. A `cargo
+/// test` can't assert on a constructed `PyErr`'s message: `PyErr`'s
+/// `Display`/`Debug` impls call `Python::attach`, which panics without an
+/// attached interpreter (this crate's `cargo test` binary never attaches
+/// one -- see this module's `mod tests` doc comment on
+/// `twofish_key_accepts_every_valid_key_length`'s neighboring test for why
+/// error paths there are pinned at the Python boundary instead). Moving the
+/// validation and message-formatting logic itself into a plain
+/// `Result<_, String>` function -- similar in spirit to `src/xts.rs`'s
+/// `XtsError` map-at-the-pyo3-boundary pattern, though as a bare `String`
+/// rather than a typed error (two messages, one consumer) -- sidesteps
+/// that without changing either error string.
+fn ctr_width_for_mode(
+    ctr_width: Option<u32>,
+    mode: ModeSelector,
+) -> Result<engine::CtrWidth, String> {
+    let Some(width) = ctr_width else {
+        return Ok(engine::CtrWidth::W128);
+    };
+    let width = match width {
+        32 => engine::CtrWidth::W32,
+        64 => engine::CtrWidth::W64,
+        128 => engine::CtrWidth::W128,
+        other => {
+            return Err(format!(
+                "invalid ctr_width {other}: expected one of 32, 64, 128"
+            ));
+        }
+    };
+    if mode != ModeSelector::Ctr {
+        return Err(format!(
+            "ctr_width is not supported for mode '{}': only mode 'ctr' accepts the ctr_width \
+             argument",
+            mode.as_str()
+        ));
+    }
+    Ok(width)
+}
+
 /// The single catalog table for `engine::Padding` (RFC 0002 change 3), in
 /// the order the `"expected one of '…'"` message lists them. [`parse_padding`]
 /// is the table's only reader -- unlike [`ModeSelector`], nothing else in
@@ -522,7 +618,7 @@ fn iv_array(iv: &[u8]) -> [u8; BLOCK_SIZE_BYTES] {
 
 #[cfg(test)]
 mod tests {
-    use super::TwofishKey;
+    use super::{ctr_width_for_mode, ModeSelector, TwofishKey};
 
     #[test]
     fn twofish_key_accepts_every_valid_key_length() {
@@ -555,5 +651,24 @@ mod tests {
         // hex representation doesn't appear in it.
         assert!(!repr.contains("ab"), "repr leaked key bytes: {repr}");
         assert!(!repr.contains("AB"), "repr leaked key bytes: {repr}");
+    }
+
+    /// Code-review finding L8: pins `TwofishKey::new_session`'s dual-
+    /// violation ordering at the Rust layer -- `parse_ctr_width` (here,
+    /// its pure `ctr_width_for_mode` core; see that function's docs re:
+    /// why cargo tests can't assert on a `PyErr`'s message directly) is
+    /// called before mode dispatch in *every* arm, so an invalid width
+    /// (not in {32, 64, 128}) combined with a non-CTR mode must raise the
+    /// invalid-width catalog error, never the width-on-non-CTR-mode error
+    /// -- catalog membership is checked before `mode` is even consulted.
+    /// (A Python-layer pin already covers the analogous type-error
+    /// precedence case -- `test_ctr_width.py::TestCtrWidthTypeGuard::
+    /// test_type_guard_precedes_the_non_ctr_mode_check`; this covers the
+    /// value-error precedence at the Rust layer instead.)
+    #[test]
+    fn ctr_width_invalid_value_beats_non_ctr_mode_mismatch_in_error_precedence() {
+        let err = ctr_width_for_mode(Some(7), ModeSelector::Cbc)
+            .expect_err("width 7 is outside the {32, 64, 128} catalog");
+        assert_eq!(err, "invalid ctr_width 7: expected one of 32, 64, 128");
     }
 }

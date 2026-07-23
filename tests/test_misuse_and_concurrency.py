@@ -55,7 +55,7 @@ import threading
 import time
 
 import pytest
-from oxifish import DecryptionError, Mode, Padding, TwofishKey, TwofishSession
+from oxifish import DecryptionError, Mode, Padding, TwofishKey, TwofishSession, TwofishXTS
 
 KEY_16 = bytes(range(16))
 IV = bytes(range(16, 32))
@@ -157,6 +157,50 @@ class TestErrorCatalog:
         ):
             key.encrypt(b"data", iv=IV, padding="bogus")
 
+    def test_invalid_ctr_width(self) -> None:
+        # RFC 0003 §3.
+        key = TwofishKey(KEY_16)
+        with pytest.raises(
+            ValueError, match=r"^invalid ctr_width 99: expected one of 32, 64, 128$"
+        ):
+            key.encrypt(b"data", Mode.CTR, iv=IV, ctr_width=99)  # type: ignore[call-overload]
+
+    def test_non_int_ctr_width(self) -> None:
+        # RFC 0003 §3: a non-int ctr_width is a TypeError, distinct from
+        # the ValueError catalog row above for out-of-catalog *int* values.
+        key = TwofishKey(KEY_16)
+        with pytest.raises(TypeError, match=r"^ctr_width must be an int, got float$"):
+            key.encrypt(b"data", Mode.CTR, iv=IV, ctr_width=32.0)  # type: ignore[call-overload]
+
+    def test_invalid_tweak(self) -> None:
+        # RFC 0003 §2. Voice-parallel to test_invalid_ctr_width above; the
+        # exact-string pin itself lives in
+        # tests/test_xts.py::TestTweakValidation.
+        xts = TwofishXTS(bytes(range(16)) + bytes(range(200, 216)))
+        with pytest.raises(
+            ValueError,
+            match=r"^tweak must be a non-negative integer less than 2\*\*128, got -1$",
+        ):
+            xts.encrypt(b"data" * 4, tweak=-1)
+
+    def test_non_int_tweak(self) -> None:
+        # RFC 0003 §2: a non-int tweak is a TypeError, distinct from the
+        # ValueError catalog row above for out-of-range *int* values.
+        xts = TwofishXTS(bytes(range(16)) + bytes(range(200, 216)))
+        with pytest.raises(TypeError, match=r"^tweak must be an int, got float$"):
+            xts.encrypt(b"data" * 4, tweak=0.0)  # type: ignore[arg-type]
+
+    def test_ctr_width_on_non_ctr_mode(self) -> None:
+        # RFC 0003 §3: voice-parallel to the padding-with-stream-mode
+        # rejection above.
+        key = TwofishKey(KEY_16)
+        with pytest.raises(
+            ValueError,
+            match=r"^ctr_width is not supported for mode 'cbc': only mode 'ctr' "
+            r"accepts the ctr_width argument$",
+        ):
+            key.encrypt(b"data", Mode.CBC, iv=IV, ctr_width=64)
+
     def test_update_after_finalize(self) -> None:
         key = TwofishKey(KEY_16)
         session = key.encryptor(Mode.CBC, iv=IV, padding=Padding.PKCS7)
@@ -250,6 +294,32 @@ class TestPickleAndCopyGuards:
         session = TwofishKey(KEY_16).ecb_encryptor(padding=Padding.NONE)
         with pytest.raises(TypeError):
             pickle.dumps(session)
+
+
+class TestKeyIdentityEqualityContract:
+    """Code-review finding L5: `TwofishKey` defines neither `__eq__` nor
+    `__hash__`, so plain object identity applies -- and that IS the
+    intended contract for key-material objects: value-based `__eq__`
+    would require comparing secrets (and would invite accidental
+    "are these the same key?" checks that leak timing). These are
+    characterization pins, not new behavior."""
+
+    def test_instance_equals_itself(self) -> None:
+        key = TwofishKey(KEY_16)
+        assert key == key
+
+    def test_two_instances_from_identical_key_bytes_are_not_equal(self) -> None:
+        # Equality would require comparing secrets -- identity is correct.
+        assert TwofishKey(KEY_16) != TwofishKey(KEY_16)
+
+    def test_two_instances_from_identical_key_bytes_have_independent_hashes(self) -> None:
+        # Identity-based hashing: almost surely distinct across two
+        # independently-allocated objects (not value-derived).
+        assert hash(TwofishKey(KEY_16)) != hash(TwofishKey(KEY_16))
+
+    def test_hash_is_stable_across_calls(self) -> None:
+        key = TwofishKey(KEY_16)
+        assert hash(key) == hash(key)
 
 
 class TestConcurrentSessionAccess:

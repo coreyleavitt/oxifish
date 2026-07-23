@@ -16,18 +16,20 @@ crate-type = ["cdylib"]
 [dependencies]
 # 0.29 floor: RUSTSEC-2026-0176 / RUSTSEC-2026-0177 are fixed in 0.29.0.
 pyo3 = "0.29"
-twofish = { version = "0.7", features = ["zeroize"] }
-cbc = { version = "0.1", features = ["zeroize"] }
-ctr = { version = "0.9", features = ["zeroize"] }
-cfb-mode = { version = "0.8", features = ["zeroize"] }
-ofb = { version = "0.6", features = ["zeroize"] }
-cipher = { version = "0.4", features = ["zeroize"] }
+twofish = { version = "0.8", features = ["zeroize"] }
+cbc = { version = "0.2", features = ["zeroize"] }
+ctr = { version = "0.10", features = ["zeroize"] }
+cfb-mode = { version = "0.9", features = ["zeroize"] }
+ofb = { version = "0.7", features = ["zeroize"] }
+cipher = { version = "0.5", features = ["zeroize", "stream-wrapper"] }
 zeroize = { version = "1.7", features = ["derive"] }
 getrandom = "0.4"
 
 [dev-dependencies]
 hex = "0.4"
 static_assertions = "1.1"
+aes = "0.9"
+xts-mode = "0.6"
 
 [profile.release]
 lto = true

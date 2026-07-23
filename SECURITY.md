@@ -4,13 +4,16 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
+| 0.3.x   | :white_check_mark: |
+| 0.2.x   | :x: (EOL)           |
 | 0.1.x   | :x: (EOL)           |
 
-0.2.0 is a breaking-change release (the old per-mode class API is
-removed; see the [release notes](https://github.com/coreyleavitt/oxifish/releases)
-for the migration table). 0.1.x receives no further updates, including
-security fixes — upgrade to 0.2.x.
+0.3.0 is an additive release (new `TwofishXTS` disk-volume construct and
+the `ctr_width` keyword; no breaking changes — see the [release
+notes](https://github.com/coreyleavitt/oxifish/releases)). 0.2.0 was a
+breaking-change release (the old per-mode class API is removed; see the
+release notes for the migration table). 0.2.x and 0.1.x receive no
+further updates, including security fixes — upgrade to 0.3.x.
 
 ## Reporting a Vulnerability
 
@@ -70,6 +73,45 @@ that memory. This is standard for Python crypto bindings — the
 your threat model includes memory disclosure; scope key-bearing
 variables narrowly if it does.
 
+**`TwofishXTS`** (RFC 0003) zeroizes in full, not just its two key
+schedules. Both expanded `Twofish` schedules (the data-key half and the
+tweak-key half) are zeroized on drop, matching `TwofishKey`'s model above.
+In addition — because XTS has no `engine::Session` to hide transient
+buffers behind — the owned copy of each call's input buffer (made while
+the GIL is held, see "Concurrency" below) and the engine's returned output
+buffer are explicitly zeroized once they've been copied out to the Python
+`bytes` object the caller receives; the ciphertext-stealing scratch used
+internally for non-block-multiple data units is zeroized the same way,
+inside the Rust XTS engine itself. The same Python-side-key-bytes caveat
+above applies to `TwofishXTS`'s `key` argument, with one addition: the
+facade's `_split_xts_key` splits the coerced key into `key1`/`key2`
+halves, each a distinct, immutable `bytes` object outside this library's
+reach and subject to the same limitation as the original `key` argument.
+
+### First-party XTS implementation
+
+Unlike the rest of this library — which binds RustCrypto's audited
+`twofish`/`cbc`/`ctr`/`cfb-mode`/`ofb` crates and adds no cipher-mode code
+of its own — **`TwofishXTS`'s XTS-mode logic is oxifish's own
+implementation**, not RustCrypto's: RustCrypto has no XTS crate (its
+block-mode traits don't fit ciphertext stealing's whole-data-unit shape).
+The tweak-block encoding, GF(2¹²⁸) doubling, and ciphertext stealing
+(`src/xts.rs`, ~100 lines) are hand-written against the `cipher` 0.5
+traits. This is the one seam where this project's usual "we bind audited
+implementations, we don't write cipher code" pitch does not hold, and it's
+said plainly here rather than left implicit.
+
+That implementation is validated four independent ways: the official IEEE
+1619 (P1619/D16) Annex B known-answer vector set, generically instantiated
+with AES in cargo tests (including the ciphertext-stealing vectors, not
+just the block-aligned ones); bidirectional cross-validation against the
+independent `xts-mode` crate (a cargo dev-dependency oracle, run both
+encrypt-ours/decrypt-theirs and the reverse); an independent pure-Python
+XTS reference implementation in the pytest suite, built over this
+library's own KAT-pinned ECB primitive; and a real VeraCrypt volume
+(`tests/fixtures/`, when present — see that directory's README for the
+recipe and current status).
+
 ## Known Limitations
 
 - **Not constant-time**: Twofish uses key-dependent S-boxes, which are
@@ -103,7 +145,21 @@ variables narrowly if it does.
   the dedicated `ecb_encryptor`/`ecb_decryptor` factories. It leaks
   equal-block plaintext patterns at any length — the factories restrict
   discoverability, not payload size, so multi-block ECB use is on the
-  caller. Use CBC, CTR, CFB, or OFB for actual encryption.
+  caller. This is also the documented migration path off the dead PyPI
+  `twofish` package (see the README), which was itself a bare
+  single-block primitive with the same pattern-leakage exposure for any
+  caller who processes more than one block through it. Use CBC, CTR,
+  CFB, or OFB for actual encryption.
+- **XTS (`TwofishXTS`)**: tweak reuse across rewrites of the same data
+  unit is *correct* here, unlike IV reuse everywhere else in this library
+  — see the README's "tweak is a position, not a nonce" note. A wrong
+  tweak, or a data-unit size that doesn't match the format being decoded
+  (e.g. assuming a drive's physical 4Kn sector size instead of
+  VeraCrypt's fixed 512-byte data unit), silently yields garbage
+  plaintext with no error, the same failure mode as a wrong key or IV
+  elsewhere in this library. Like every other construct here, XTS is
+  unauthenticated — it provides no integrity guarantee, only
+  confidentiality.
 
 For details on Twofish's security properties, see the [RustCrypto twofish crate](https://github.com/RustCrypto/block-ciphers/tree/master/twofish).
 

@@ -14,11 +14,14 @@
 //!   data.
 //! - **Padding:** implemented once, mode-agnostically, against the final
 //!   block at close-out. CBC and ECB share this path by construction; the
-//!   `cbc` crate's own `encrypt_padded_mut`/`decrypt_padded_mut` helpers are
+//!   `cbc` crate's own `encrypt_padded`/`decrypt_padded` helpers are
 //!   deliberately not used (they would be a second padding implementation).
 //! - **Session state:** `Fresh -> Streaming -> Finalized`. A finalized
 //!   session rejects further input; close-out consumes the session even
-//!   when it fails.
+//!   when it fails. A mid-session CTR/OFB keystream-exhaustion failure
+//!   (reachable through a plain `update()` call, never only through
+//!   close-out) finalizes the session too, at the single site in
+//!   [`Session::ingest`] — see "CTR width" below.
 //!
 //! Dispatch over the concrete RustCrypto mode objects is a plain `Send`
 //! Rust enum ([`Transform`]) — no trait objects. Each non-ECB session owns
@@ -54,11 +57,37 @@
 //! variants — every ingested byte is transformed and returned immediately,
 //! and [`Session::close_out`] has nothing left to flush.
 //!
+//! **CTR width (RFC 0003 slice 5).** Three [`Transform`] variants —
+//! `Ctr32`/`Ctr64`/`Ctr128` — cover the `ctr_width` parameter (32/64/128
+//! low-order counter bits, big-endian; `Ctr128` is the pre-RFC-0003
+//! default and only width). `Session::ingest`'s Stream branch calls the
+//! *fallible* `StreamCipher::try_apply_keystream` (verified against `ctr`
+//! 0.10.1's/`cipher` 0.5.2's own source: on error it leaves the buffer and
+//! the internal counter untouched — never a partial keystream leak, never
+//! a panic) for CTR **and** OFB alike, translating a `StreamCipherError`
+//! into [`EngineError::KeystreamExhausted`]. The crate's own
+//! `remaining_blocks()` accounting is what enforces the RFC's exhaustion
+//! bound (`2**ctr_width - 1` blocks per session, the low-order counter
+//! wrapping through zero along the way) — this engine does not duplicate
+//! that check independently, per the RFC's explicit rejection of a
+//! stricter "distance to 2^N" pre-check. OFB's `remaining_blocks()` is
+//! hardcoded `None` (unbounded) in `ofb` 0.7.1, so the `Err` arm is
+//! reachable only for the three `Ctr*` variants in practice; OFB shares
+//! the fallible call anyway, as defense in depth. On that `Err`,
+//! [`Session::ingest`] also zeroizes its now-unused scratch copy of the
+//! caller's plaintext and immediately finalizes the session (`Streaming ->
+//! Finalized`) before returning the error — the single site that does so,
+//! whether this call came from [`Session::close_out`] or directly from a
+//! caller's `update()`/`ingest()`. Without that, a failed `update()` would
+//! leave the session `Streaming`, and a subsequent `finalize()` needing
+//! zero further keystream blocks would succeed cleanly, silently masking
+//! that the failed chunk was never processed.
+//!
 //! **CFB (the bug fix).** CFB retains **one live** `cfb_mode::Encryptor`/
 //! `Decryptor` per session — never the self-buffering `Buf*` variants — and
 //! is driven through the *same* `pending`/`apply_blocks` path CBC uses:
-//! complete blocks are transformed eagerly via `encrypt_blocks_inout_mut`/
-//! `decrypt_blocks_inout_mut` against the one retained mode object, so the
+//! complete blocks are transformed eagerly via `encrypt_blocks_inout`/
+//! `decrypt_blocks_inout` against the one retained mode object, so the
 //! feedback register advances exactly once per real block boundary,
 //! regardless of how the caller chunks their input. This is structurally
 //! why the old bug (sub-16-byte chunks freezing the register; larger
@@ -67,8 +96,8 @@
 //! because the engine — not the caller's chunk boundaries — decides when a
 //! block is complete. Unlike CBC/ECB, CFB has no padding (it is a stream
 //! mode): close-out resolves any sub-block residue by generating one more
-//! keystream block from the current register (`encrypt_block_mut`/
-//! `decrypt_block_mut` on a zero-padded block) and keeping only the bytes
+//! keystream block from the current register (`encrypt_block`/
+//! `decrypt_block` on a zero-padded block) and keeping only the bytes
 //! the caller actually sent — no alignment error; arbitrary total lengths,
 //! including zero, are valid for all three stream modes.
 
@@ -78,7 +107,7 @@ use std::sync::Arc;
 
 use cipher::consts::U16;
 use cipher::inout::InOutBuf;
-use cipher::{Block, BlockDecrypt, BlockDecryptMut, BlockEncrypt, BlockEncryptMut};
+use cipher::{Block, BlockCipherDecrypt, BlockCipherEncrypt, BlockModeDecrypt, BlockModeEncrypt};
 use twofish::Twofish;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -104,6 +133,20 @@ pub(crate) enum Padding {
     None,
 }
 
+/// CTR low-order counter width, in bits (RFC 0003 §3, `ctr_width`): the
+/// number of low-order bits of the initial counter block that increment,
+/// big-endian, relative to session start, wrapping through zero after
+/// `2**width - 1` blocks. `W128` is the pre-RFC-0003 default and only
+/// width — the whole 16-byte IV is the counter, so `Ctr128BE`'s cycle
+/// (`2**128 - 1` blocks) is unreachable by any real payload, matching the
+/// RFC's "today's behavior is unchanged" claim.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CtrWidth {
+    W32,
+    W64,
+    W128,
+}
+
 /// Engine-level failures. The PyO3 layer maps these onto the RFC's
 /// normative error catalog; `Display` already produces the catalog strings.
 #[derive(Debug, PartialEq, Eq)]
@@ -119,6 +162,16 @@ pub(crate) enum EngineError {
     /// error-string channel — deliberately carries no diagnostic payload,
     /// so it cannot itself become a side channel.
     DecryptionFailed,
+    /// CTR keystream exhaustion (RFC 0003 §3): the session's relative,
+    /// low-`width`-bit counter has been asked for more than
+    /// `2**width - 1` blocks total (one-shot, or cumulatively across a
+    /// session's `update` calls). Surfaced by translating the crate's
+    /// fallible `try_apply_keystream`/`StreamCipherError` (see
+    /// [`Transform::try_apply_stream`]) rather than an independent
+    /// pre-check — the RFC explicitly rejects a stricter "distance to
+    /// 2^N" pre-check as non-standard behavior that would wrongly reject
+    /// legitimate wrapping streams.
+    KeystreamExhausted { width: u32 },
 }
 
 impl fmt::Display for EngineError {
@@ -132,6 +185,11 @@ impl fmt::Display for EngineError {
             EngineError::DecryptionFailed => {
                 f.write_str("decryption failed: invalid or corrupted ciphertext")
             }
+            EngineError::KeystreamExhausted { width } => write!(
+                f,
+                "CTR keystream exhausted: ctr_width={width} supports at most \
+                 2**{width} - 1 blocks per stream"
+            ),
         }
     }
 }
@@ -159,10 +217,18 @@ enum Transform {
     /// CFB decryption via an incrementally driven, live-register
     /// `cfb_mode::Decryptor`.
     CfbDec(cfb_mode::Decryptor<Twofish>),
-    /// CTR keystream, `Ctr128BE`: the full 16-byte IV is a single
+    /// CTR keystream, `ctr_width=32` (`Ctr32BE`): the low 32 bits of the
+    /// initial counter block increment, big-endian, relative to session
+    /// start, wrapping through zero; the upper 96 bits (the caller's
+    /// nonce) never carry (RFC 0003 §3).
+    Ctr32(ctr::Ctr32BE<Twofish>),
+    /// CTR keystream, `ctr_width=64` (`Ctr64BE`). See [`Transform::Ctr32`].
+    Ctr64(ctr::Ctr64BE<Twofish>),
+    /// CTR keystream, `ctr_width=128` (`Ctr128BE`) — the default, and,
+    /// before RFC 0003, the only width: the full 16-byte IV is a single
     /// big-endian 128-bit initial counter block (not a nonce+counter
     /// split), incremented once per block by `StreamCipherCoreWrapper`.
-    Ctr(ctr::Ctr128BE<Twofish>),
+    Ctr128(ctr::Ctr128BE<Twofish>),
     /// OFB keystream via `StreamCipherCoreWrapper<OfbCore<..>>`.
     Ofb(ofb::Ofb<Twofish>),
 }
@@ -211,13 +277,16 @@ impl Transform {
             "apply_blocks: unexpected non-block-aligned tail from into_chunks"
         );
         match self {
-            Transform::CbcEnc(enc) => enc.encrypt_blocks_inout_mut(blocks),
-            Transform::CbcDec(dec) => dec.decrypt_blocks_inout_mut(blocks),
+            Transform::CbcEnc(enc) => enc.encrypt_blocks_inout(blocks),
+            Transform::CbcDec(dec) => dec.decrypt_blocks_inout(blocks),
             Transform::EcbEnc(cipher) => cipher.encrypt_blocks_inout(blocks),
             Transform::EcbDec(cipher) => cipher.decrypt_blocks_inout(blocks),
-            Transform::CfbEnc(enc) => enc.encrypt_blocks_inout_mut(blocks),
-            Transform::CfbDec(dec) => dec.decrypt_blocks_inout_mut(blocks),
-            Transform::Ctr(_) | Transform::Ofb(_) => {
+            Transform::CfbEnc(enc) => enc.encrypt_blocks_inout(blocks),
+            Transform::CfbDec(dec) => dec.decrypt_blocks_inout(blocks),
+            Transform::Ctr32(_)
+            | Transform::Ctr64(_)
+            | Transform::Ctr128(_)
+            | Transform::Ofb(_) => {
                 unreachable!("Stream-kind transforms never reach apply_blocks")
             }
         }
@@ -225,19 +294,42 @@ impl Transform {
 
     /// Apply the keystream to `buf` in place, byte-granular, self-buffering
     /// mid-block position across calls. `Stream`-kind transforms only.
-    fn apply_stream(&mut self, buf: &mut [u8]) {
+    /// Fallible (RFC 0003 §3): on `Err`, `buf` and the transform's internal
+    /// counter/register are both left untouched (verified against `cipher`
+    /// 0.5.2's `try_apply_keystream_inout` source: `check_remaining` runs
+    /// *before* any mutation) — never a partial keystream leak, never a
+    /// panic. See the module docs' "CTR width" section for why OFB shares
+    /// this fallible call despite never actually erroring.
+    fn try_apply_stream(&mut self, buf: &mut [u8]) -> Result<(), cipher::StreamCipherError> {
         use cipher::StreamCipher;
         match self {
-            Transform::Ctr(c) => c.apply_keystream(buf),
-            Transform::Ofb(c) => c.apply_keystream(buf),
-            _ => unreachable!("apply_stream is only called for Stream-kind transforms"),
+            Transform::Ctr32(c) => c.try_apply_keystream(buf),
+            Transform::Ctr64(c) => c.try_apply_keystream(buf),
+            Transform::Ctr128(c) => c.try_apply_keystream(buf),
+            Transform::Ofb(c) => c.try_apply_keystream(buf),
+            _ => unreachable!("try_apply_stream is only called for Stream-kind transforms"),
+        }
+    }
+
+    /// This transform's CTR width in bits, or `None` for OFB (which has no
+    /// `ctr_width` concept). Used only to build
+    /// [`EngineError::KeystreamExhausted`]'s message when
+    /// [`Transform::try_apply_stream`] fails — `Stream`-kind transforms
+    /// only.
+    fn ctr_width(&self) -> Option<u32> {
+        match self {
+            Transform::Ctr32(_) => Some(32),
+            Transform::Ctr64(_) => Some(64),
+            Transform::Ctr128(_) => Some(128),
+            Transform::Ofb(_) => None,
+            _ => unreachable!("ctr_width is only called for Stream-kind transforms"),
         }
     }
 
     /// One partial keystream block for CFB close-out: zero-pad `pending`'s
     /// residue to a full block, run it through the live retained
-    /// `Encryptor`/`Decryptor` (one ordinary `encrypt_block_mut`/
-    /// `decrypt_block_mut` call — the register still advances internally,
+    /// `Encryptor`/`Decryptor` (one ordinary `encrypt_block`/
+    /// `decrypt_block` call — the register still advances internally,
     /// but the session is finalized immediately afterwards so that never
     /// matters), and write back only the first `residue.len()` bytes.
     /// `FeedbackEnc`/`FeedbackDec` kinds only.
@@ -246,8 +338,8 @@ impl Transform {
         let mut block = Block::<Twofish>::default();
         block[..residue.len()].copy_from_slice(residue);
         match self {
-            Transform::CfbEnc(enc) => enc.encrypt_block_mut(&mut block),
-            Transform::CfbDec(dec) => dec.decrypt_block_mut(&mut block),
+            Transform::CfbEnc(enc) => enc.encrypt_block(&mut block),
+            Transform::CfbDec(dec) => dec.decrypt_block(&mut block),
             _ => unreachable!("apply_partial_feedback_block is only called for Feedback kinds"),
         }
         let mut out = [0u8; BLOCK_SIZE];
@@ -268,7 +360,10 @@ impl Transform {
             Transform::CbcDec(_) | Transform::EcbDec(_) => Kind::BlockPaddedDec,
             Transform::CfbEnc(_) => Kind::FeedbackEnc,
             Transform::CfbDec(_) => Kind::FeedbackDec,
-            Transform::Ctr(_) | Transform::Ofb(_) => Kind::Stream,
+            Transform::Ctr32(_)
+            | Transform::Ctr64(_)
+            | Transform::Ctr128(_)
+            | Transform::Ofb(_) => Kind::Stream,
         }
     }
 }
@@ -404,7 +499,7 @@ impl Session {
     /// clone (per-session zeroization; see module docs).
     pub(crate) fn cbc_encryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE], padding: Padding) -> Self {
         use cipher::InnerIvInit;
-        let enc = cbc::Encryptor::inner_iv_init(cipher, Block::<Twofish>::from_slice(iv));
+        let enc = cbc::Encryptor::inner_iv_init(cipher, &Block::<Twofish>::from(*iv));
         Self::new(Transform::CbcEnc(enc), padding)
     }
 
@@ -412,7 +507,7 @@ impl Session {
     /// clone (per-session zeroization; see module docs).
     pub(crate) fn cbc_decryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE], padding: Padding) -> Self {
         use cipher::InnerIvInit;
-        let dec = cbc::Decryptor::inner_iv_init(cipher, Block::<Twofish>::from_slice(iv));
+        let dec = cbc::Decryptor::inner_iv_init(cipher, &Block::<Twofish>::from(*iv));
         Self::new(Transform::CbcDec(dec), padding)
     }
 
@@ -430,7 +525,7 @@ impl Session {
     /// module docs: CFB (the bug fix)). Stream mode — never padded.
     pub(crate) fn cfb_encryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE]) -> Self {
         use cipher::InnerIvInit;
-        let enc = cfb_mode::Encryptor::inner_iv_init(cipher, Block::<Twofish>::from_slice(iv));
+        let enc = cfb_mode::Encryptor::inner_iv_init(cipher, &Block::<Twofish>::from(*iv));
         Self::new(Transform::CfbEnc(enc), Padding::None)
     }
 
@@ -438,28 +533,44 @@ impl Session {
     /// Stream mode — never padded.
     pub(crate) fn cfb_decryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE]) -> Self {
         use cipher::InnerIvInit;
-        let dec = cfb_mode::Decryptor::inner_iv_init(cipher, Block::<Twofish>::from_slice(iv));
+        let dec = cfb_mode::Decryptor::inner_iv_init(cipher, &Block::<Twofish>::from(*iv));
         Self::new(Transform::CfbDec(dec), Padding::None)
     }
 
-    /// CTR encrypt session (`Ctr128BE`; see [`Transform::Ctr`] for the IV
-    /// contract). Encrypt and decrypt construct the identical keystream
-    /// object — CTR is its own inverse — kept as two named factories for
-    /// symmetry with the other modes and so a future direction property has
-    /// an obvious construction site to read it from.
-    pub(crate) fn ctr_encryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE]) -> Self {
-        Self::new(Transform::Ctr(Self::make_ctr(cipher, iv)), Padding::None)
+    /// CTR encrypt session (`ctr_width` selects `Ctr32BE`/`Ctr64BE`/
+    /// `Ctr128BE`; see [`Transform::Ctr32`] for the wrap/width contract).
+    /// Encrypt and decrypt construct the identical keystream object — CTR
+    /// is its own inverse — kept as two named factories for symmetry with
+    /// the other modes and so a future direction property has an obvious
+    /// construction site to read it from.
+    pub(crate) fn ctr_encryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE], width: CtrWidth) -> Self {
+        Self::new(Self::make_ctr(cipher, iv, width), Padding::None)
     }
 
     /// CTR decrypt session. See [`Session::ctr_encryptor`].
-    pub(crate) fn ctr_decryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE]) -> Self {
-        Self::new(Transform::Ctr(Self::make_ctr(cipher, iv)), Padding::None)
+    pub(crate) fn ctr_decryptor(cipher: Twofish, iv: &[u8; BLOCK_SIZE], width: CtrWidth) -> Self {
+        Self::new(Self::make_ctr(cipher, iv, width), Padding::None)
     }
 
-    fn make_ctr(cipher: Twofish, iv: &[u8; BLOCK_SIZE]) -> ctr::Ctr128BE<Twofish> {
+    /// Build the width-appropriate `Transform::Ctr32`/`Ctr64`/`Ctr128`
+    /// variant. Returns `Transform` directly (rather than one flavor's
+    /// concrete wrapper type, as the pre-RFC-0003 single-width `make_ctr`
+    /// did) since the three widths are now three distinct monomorphized
+    /// types with no common supertype short of the enum itself.
+    fn make_ctr(cipher: Twofish, iv: &[u8; BLOCK_SIZE], width: CtrWidth) -> Transform {
         use cipher::{InnerIvInit, StreamCipherCoreWrapper};
-        let core = ctr::CtrCore::inner_iv_init(cipher, Block::<Twofish>::from_slice(iv));
-        StreamCipherCoreWrapper::from_core(core)
+        let iv_block = Block::<Twofish>::from(*iv);
+        match width {
+            CtrWidth::W32 => Transform::Ctr32(StreamCipherCoreWrapper::from_core(
+                ctr::CtrCore::inner_iv_init(cipher, &iv_block),
+            )),
+            CtrWidth::W64 => Transform::Ctr64(StreamCipherCoreWrapper::from_core(
+                ctr::CtrCore::inner_iv_init(cipher, &iv_block),
+            )),
+            CtrWidth::W128 => Transform::Ctr128(StreamCipherCoreWrapper::from_core(
+                ctr::CtrCore::inner_iv_init(cipher, &iv_block),
+            )),
+        }
     }
 
     /// OFB encrypt session. See [`Session::ctr_encryptor`] re: the shared
@@ -475,7 +586,7 @@ impl Session {
 
     fn make_ofb(cipher: Twofish, iv: &[u8; BLOCK_SIZE]) -> ofb::Ofb<Twofish> {
         use cipher::{InnerIvInit, StreamCipherCoreWrapper};
-        let core = ofb::OfbCore::inner_iv_init(cipher, Block::<Twofish>::from_slice(iv));
+        let core = ofb::OfbCore::inner_iv_init(cipher, &Block::<Twofish>::from(*iv));
         StreamCipherCoreWrapper::from_core(core)
     }
 
@@ -503,15 +614,55 @@ impl Session {
     ///
     /// `Stream`-kind sessions (CTR/OFB) bypass all of the above: no
     /// blocking, no holdback, byte-granular in and out via
-    /// [`Transform::apply_stream`].
+    /// [`Transform::try_apply_stream`] — whose `Err` (CTR keystream
+    /// exhaustion, RFC 0003) is translated here into
+    /// [`EngineError::KeystreamExhausted`]. This is the single site that
+    /// finalizes the session on that error (module docs: "Session state"),
+    /// zeroizing the scratch output buffer first since it still holds the
+    /// caller's untouched plaintext. A failed `ingest` — whether called
+    /// directly (e.g. via `TwofishSession::update`) or as `close_out`'s own
+    /// first step — therefore leaves the session `Finalized` rather than
+    /// `Streaming`; a subsequent call raises the ordinary
+    /// [`EngineError::SessionFinalized`] rather than silently succeeding.
     pub(crate) fn ingest(&mut self, chunk: &[u8]) -> Result<Vec<u8>, EngineError> {
         self.begin()?;
         self.total_len += chunk.len();
 
         if self.transform.kind() == Kind::Stream {
             let mut out = chunk.to_vec();
-            self.transform.apply_stream(&mut out);
-            return Ok(out);
+            return match self.transform.try_apply_stream(&mut out) {
+                Ok(()) => Ok(out),
+                Err(_) => {
+                    // `out` is still the caller's plaintext, untouched by
+                    // the failed keystream application (`cipher` 0.5.2's
+                    // check-before-mutate contract leaves the buffer alone
+                    // on `Err` -- see `Transform::try_apply_stream`'s own
+                    // docs): scrub it before it drops, matching the
+                    // module's zeroization discipline for every other
+                    // engine-owned intermediate copy of plaintext.
+                    out.zeroize();
+                    // Exhaustion consumes the session at this single site
+                    // (module docs: "Session state") rather than only when
+                    // reached through `close_out` -- this failure is also
+                    // reachable directly via `TwofishSession::update`,
+                    // which never finalizes on its own. Without this, a
+                    // failed `update()` would leave the session
+                    // `Streaming`, and a subsequent `finalize()` needing
+                    // zero further keystream blocks would succeed cleanly,
+                    // masking the failed chunk.
+                    self.state = State::Finalized;
+                    Err(EngineError::KeystreamExhausted {
+                        width: self.transform.ctr_width().unwrap_or_else(|| {
+                            unreachable!(
+                                "OFB's StreamCipherCoreWrapper<OfbCore<_>>::remaining_blocks() \
+                                 is hardcoded to None (ofb 0.7.1 source), so check_remaining() \
+                                 is always Ok and try_apply_keystream can never return Err for \
+                                 OFB -- only a Ctr32/Ctr64/Ctr128 variant can reach this branch"
+                            )
+                        }),
+                    })
+                }
+            };
         }
 
         let complete = (self.pending.len + chunk.len()) / BLOCK_SIZE;
@@ -603,10 +754,22 @@ impl Session {
     /// (CFB) resolve any sub-block residue via one partial keystream block,
     /// never erroring on misalignment (see [`Session::close_out_feedback`]);
     /// `Stream` (CTR/OFB) has nothing left to do — `ingest` already emitted
-    /// every byte.
+    /// every byte, unless it failed with
+    /// [`EngineError::KeystreamExhausted`] (RFC 0003 slice 5) -- the first
+    /// `ingest` failure mode that isn't "already finalized". `ingest`
+    /// itself finalizes the session on that error now (see its own docs
+    /// and the module docs' "Session state") -- the single site that does
+    /// so, since the same failure is also reachable directly via
+    /// `TwofishSession::update`, never only through this method. The
+    /// unconditional `self.state = State::Finalized` below is what covers
+    /// every *other* failure mode this method can surface (unaligned
+    /// length, bad padding, etc.), which `ingest` never finalizes for on
+    /// its own. Either way, "close-out consumes the session even on
+    /// failure" (module docs) holds for every failure mode reachable here.
     pub(crate) fn close_out(&mut self, chunk: &[u8]) -> Result<Vec<u8>, EngineError> {
-        let mut out = self.ingest(chunk)?;
+        let ingest_result = self.ingest(chunk);
         self.state = State::Finalized;
+        let mut out = ingest_result?;
         match self.transform.kind() {
             Kind::BlockPaddedDec => self.close_out_decrypt(&mut out)?,
             Kind::BlockPaddedEnc => {
@@ -723,6 +886,39 @@ impl Session {
                     })
                 }
             }
+        }
+    }
+}
+
+/// Test-only backdoor onto a CTR session's relative block counter (RFC
+/// 0003 Testing Strategy: "reach it with `cipher::StreamCipherSeek`
+/// fast-forwarding the relative counter near the cycle end"). `Session`
+/// otherwise hides `transform` entirely, so this is the one seam a cargo
+/// test needs to exercise `ingest`'s real fallible path near the
+/// `2**width - 1` exhaustion boundary without generating gigabytes of
+/// keystream. Kept as a real `impl Session` method (not a free function
+/// reaching into a public field) so it goes through the exact same
+/// `StreamCipherSeek::seek` the crate exposes -- not a hand-rolled
+/// counter-poke.
+#[cfg(test)]
+impl Session {
+    /// Seek to `block_index` (0-based, relative to session start) by
+    /// converting to `StreamCipherSeek`'s byte-position API
+    /// (`block_index * BLOCK_SIZE`). Panics (a cargo-test-only misuse, not
+    /// a Python-input-reachable one) if this session isn't CTR, or if
+    /// `block_index * BLOCK_SIZE` overflows `u64` (only possible for
+    /// widths >= 64, whose exhaustion boundary is unreachable this way in
+    /// the first place -- see the exhaustion tests' own docs).
+    pub(crate) fn seek_ctr_blocks_for_test(&mut self, block_index: u64) {
+        use cipher::StreamCipherSeek;
+        let byte_pos = block_index
+            .checked_mul(BLOCK_SIZE as u64)
+            .expect("block_index * BLOCK_SIZE overflowed u64");
+        match &mut self.transform {
+            Transform::Ctr32(c) => c.seek(byte_pos),
+            Transform::Ctr64(c) => c.seek(byte_pos),
+            Transform::Ctr128(c) => c.seek(byte_pos),
+            _ => panic!("seek_ctr_blocks_for_test: session is not CTR"),
         }
     }
 }
@@ -853,7 +1049,7 @@ fn unpad_zeros(block: &[u8; BLOCK_SIZE]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+    use cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 
     const KEY: [u8; 32] = [0x42; 32];
     const IV: [u8; BLOCK_SIZE] = [0x24; BLOCK_SIZE];
@@ -897,7 +1093,7 @@ mod tests {
         let mut prev = IV;
         let mut out = Vec::with_capacity(ciphertext.len());
         for chunk in ciphertext.chunks(BLOCK_SIZE) {
-            let mut block = Block::<Twofish>::clone_from_slice(chunk);
+            let mut block = Block::<Twofish>::try_from(chunk).expect("chunk is block-sized");
             cipher.decrypt_block(&mut block);
             for (b, &p) in block.iter_mut().zip(prev.iter()) {
                 *b ^= p;
@@ -912,7 +1108,7 @@ mod tests {
     fn reference_pkcs7(msg: &[u8]) -> Vec<u8> {
         let pad = BLOCK_SIZE - msg.len() % BLOCK_SIZE;
         let mut padded = msg.to_vec();
-        padded.extend(std::iter::repeat(pad as u8).take(pad));
+        padded.extend(std::iter::repeat_n(pad as u8, pad));
         padded
     }
 
@@ -930,7 +1126,7 @@ mod tests {
         let cipher = cipher();
         let mut out = Vec::with_capacity(padded.len());
         for chunk in padded.chunks(BLOCK_SIZE) {
-            let mut block = Block::<Twofish>::clone_from_slice(chunk);
+            let mut block = Block::<Twofish>::try_from(chunk).expect("chunk is block-sized");
             cipher.encrypt_block(&mut block);
             out.extend_from_slice(&block);
         }
@@ -1496,11 +1692,11 @@ mod tests {
     }
 
     fn ctr_encrypt_session() -> Session {
-        Session::ctr_encryptor(cipher(), &IV)
+        Session::ctr_encryptor(cipher(), &IV, CtrWidth::W128)
     }
 
     fn ctr_decrypt_session() -> Session {
-        Session::ctr_decryptor(cipher(), &IV)
+        Session::ctr_decryptor(cipher(), &IV, CtrWidth::W128)
     }
 
     fn ofb_encrypt_session() -> Session {
@@ -1522,7 +1718,7 @@ mod tests {
         let mut register = iv;
         let mut out = Vec::with_capacity(plaintext.len());
         for chunk in plaintext.chunks(BLOCK_SIZE) {
-            let mut ks = Block::<Twofish>::clone_from_slice(&register);
+            let mut ks = Block::<Twofish>::from(register);
             cipher.encrypt_block(&mut ks);
             let mut block = [0u8; BLOCK_SIZE];
             for (b, (&p, &k)) in block.iter_mut().zip(chunk.iter().zip(ks.iter())) {
@@ -1544,7 +1740,7 @@ mod tests {
         let mut register = iv;
         let mut out = Vec::with_capacity(ciphertext.len());
         for chunk in ciphertext.chunks(BLOCK_SIZE) {
-            let mut ks = Block::<Twofish>::clone_from_slice(&register);
+            let mut ks = Block::<Twofish>::from(register);
             cipher.encrypt_block(&mut ks);
             let mut block = [0u8; BLOCK_SIZE];
             for (b, (&c, &k)) in block.iter_mut().zip(chunk.iter().zip(ks.iter())) {
@@ -1560,13 +1756,14 @@ mod tests {
 
     /// Independent CTR reference: the 16-byte IV is a single big-endian
     /// u128 initial counter block, incremented by one per block — no raw
-    /// crate involved, mirroring [`Transform::Ctr`]'s documented contract.
+    /// crate involved, mirroring [`Transform::Ctr128`]'s documented
+    /// contract (`ctr_width=128`, this file's pre-RFC-0003 default).
     fn reference_ctr(key: &[u8], iv: [u8; BLOCK_SIZE], data: &[u8]) -> Vec<u8> {
         let cipher = Twofish::new_from_slice(key).expect("valid key");
         let mut counter = u128::from_be_bytes(iv);
         let mut out = Vec::with_capacity(data.len());
         for chunk in data.chunks(BLOCK_SIZE) {
-            let mut ks = Block::<Twofish>::clone_from_slice(&counter.to_be_bytes());
+            let mut ks = Block::<Twofish>::from(counter.to_be_bytes());
             cipher.encrypt_block(&mut ks);
             for (&b, &k) in chunk.iter().zip(ks.iter()) {
                 out.push(b ^ k);
@@ -1584,7 +1781,7 @@ mod tests {
         let mut register = iv;
         let mut out = Vec::with_capacity(data.len());
         for chunk in data.chunks(BLOCK_SIZE) {
-            let mut ks = Block::<Twofish>::clone_from_slice(&register);
+            let mut ks = Block::<Twofish>::from(register);
             cipher.encrypt_block(&mut ks);
             register.copy_from_slice(&ks);
             for (&b, &k) in chunk.iter().zip(ks.iter()) {
@@ -1635,6 +1832,35 @@ mod tests {
         let plaintext = one_shot(ofb_decrypt_session(), &ciphertext);
         assert_eq!(plaintext, msg);
         assert_eq!(reference_ofb(&KEY, IV, &ciphertext), msg);
+    }
+
+    /// Tripwire (code-review finding L2) for the `unreachable!()` arm in
+    /// `Session::ingest`'s Stream branch (module docs' "CTR width" section,
+    /// and the arm's own comment): that `unreachable!()` is justified only
+    /// because `ofb` 0.7.1 hardcodes `OfbCore::remaining_blocks()` to
+    /// `None` (verified against that crate's source directly, not just its
+    /// docs), so `try_apply_keystream` can never return `Err` for an OFB
+    /// session and `Transform::ctr_width()` never observes `None` from that
+    /// arm in practice. The `ofb` dependency in `Cargo.toml` is a caret
+    /// range (`"0.7"`), so a future patch release could silently change
+    /// this. This test asserts the hardcoded `None` directly against the
+    /// same concrete `OfbCore<Twofish>` type `Session::make_ofb` builds --
+    /// if a dependency bump ever makes this assertion fail, the
+    /// `unreachable!()` arm must become a real cataloged `EngineError` path
+    /// instead of a panic.
+    #[test]
+    fn ofb_core_remaining_blocks_is_hardcoded_none_the_unreachable_arms_load_bearing_assumption() {
+        use cipher::StreamCipherCore;
+
+        let Transform::Ofb(core_wrapper) = &ofb_encrypt_session().transform else {
+            panic!("ofb_encrypt_session always builds Transform::Ofb");
+        };
+        assert_eq!(
+            core_wrapper.get_core().remaining_blocks(),
+            None,
+            "ofb 0.7.1's OfbCore::remaining_blocks() must stay hardcoded to None -- see this \
+             test's doc comment for what breaks if a dependency bump changes this"
+        );
     }
 
     /// Chunking patterns shared by the three stream-mode invariance tests
@@ -1834,5 +2060,285 @@ mod tests {
             let recovered = run_partition(dsession, &expected, &sizes);
             assert_eq!(recovered, plaintext, "decrypt chunk_size={chunk_size}");
         }
+    }
+
+    // ---- RFC 0003 slice 5: CTR width (ctr_width 32/64/128) ----
+
+    fn ctr_width_session(iv: [u8; BLOCK_SIZE], width: CtrWidth) -> Session {
+        Session::ctr_encryptor(cipher(), &iv, width)
+    }
+
+    /// Hand-computed expected counter block for CTR width `width`, block
+    /// index `block_index` (0-based, relative to session start) --
+    /// mirrors `ctr` 0.10.1's `CtrFlavor::current_block`/`next_block`
+    /// exactly (verified against its source, see the RFC handoff): the
+    /// low `width` bits of the block are `iv`'s own low `width` bits plus
+    /// `block_index`, wrapping (big-endian); the remaining high bits are
+    /// copied from `iv` completely unchanged -- they never carry,
+    /// regardless of how many times the low bits wrap.
+    fn expected_ctr_block(
+        iv: [u8; BLOCK_SIZE],
+        width: CtrWidth,
+        block_index: u64,
+    ) -> [u8; BLOCK_SIZE] {
+        let mut block = iv;
+        match width {
+            CtrWidth::W32 => {
+                let base = u32::from_be_bytes(block[12..16].try_into().unwrap());
+                let ctr = base.wrapping_add(block_index as u32);
+                block[12..16].copy_from_slice(&ctr.to_be_bytes());
+            }
+            CtrWidth::W64 => {
+                let base = u64::from_be_bytes(block[8..16].try_into().unwrap());
+                let ctr = base.wrapping_add(block_index);
+                block[8..16].copy_from_slice(&ctr.to_be_bytes());
+            }
+            CtrWidth::W128 => {
+                let base = u128::from_be_bytes(block);
+                let ctr = base.wrapping_add(block_index as u128);
+                block = ctr.to_be_bytes();
+            }
+        }
+        block
+    }
+
+    /// The keystream block CTR would XOR in for `block_index` -- the raw
+    /// block-cipher encryption of [`expected_ctr_block`], independent of
+    /// the `ctr` crate entirely (same "no shared code with the primitive
+    /// under test" discipline as this file's other `reference_*`
+    /// functions).
+    fn expected_ctr_keystream(
+        iv: [u8; BLOCK_SIZE],
+        width: CtrWidth,
+        block_index: u64,
+    ) -> [u8; BLOCK_SIZE] {
+        let mut block = Block::<Twofish>::from(expected_ctr_block(iv, width, block_index));
+        cipher().encrypt_block(&mut block);
+        let mut out = [0u8; BLOCK_SIZE];
+        out.copy_from_slice(&block);
+        out
+    }
+
+    #[test]
+    fn ctr_width_32_wraps_through_zero_and_high_bits_never_carry() {
+        // Low 32 bits start at 2^32 - 2: block 0 uses 2^32-2, block 1 uses
+        // 2^32-1 (all-ones), block 2 wraps through zero back to 0 -- three
+        // blocks is enough to observe the whole cycle boundary.
+        let mut iv = [0x11u8; BLOCK_SIZE]; // distinguishable, fixed "nonce" bytes
+        iv[12..16].copy_from_slice(&(u32::MAX - 1).to_be_bytes());
+
+        let msg = [0u8; 3 * BLOCK_SIZE];
+        let ciphertext = one_shot(ctr_width_session(iv, CtrWidth::W32), &msg);
+
+        for i in 0..3u64 {
+            let expected = expected_ctr_keystream(iv, CtrWidth::W32, i);
+            let start = i as usize * BLOCK_SIZE;
+            assert_eq!(
+                &ciphertext[start..start + BLOCK_SIZE],
+                &expected,
+                "block {i}"
+            );
+        }
+
+        // High-bits-never-carry, proven directly against the hand
+        // computation (not just indirectly via the ciphertext match
+        // above): block 2's counter block, upper 12 bytes, is bit-exact
+        // with the original IV's upper 12 bytes -- unaffected by the low
+        // 32 bits wrapping through zero.
+        let block0 = expected_ctr_block(iv, CtrWidth::W32, 0);
+        let block2 = expected_ctr_block(iv, CtrWidth::W32, 2);
+        assert_eq!(&block2[..12], &iv[..12], "high 96 bits must not carry");
+        assert_eq!(&block0[..12], &iv[..12]);
+        assert_eq!(
+            &block2[12..],
+            &0u32.to_be_bytes(),
+            "low 32 bits wrap through zero"
+        );
+    }
+
+    #[test]
+    fn ctr_widths_32_64_128_diverge_past_the_first_block() {
+        // Block 0 is trivially identical for every width (it's `iv`
+        // itself, before any counter arithmetic touches it); block 1 is
+        // where each width's own low-order wraparound diverges -- but
+        // only if the increment actually crosses that width's boundary.
+        // An all-0xFF IV guarantees it: `+1` wraps each width's own low
+        // bits through zero independently (32 low bits -> 0x00000000, 64
+        // low bits -> 0x0000000000000000, all 128 bits -> all zero),
+        // producing three genuinely different 16-byte counter blocks. A
+        // "generic" IV like uniform 0x77 (tried first) is a trap here:
+        // incrementing a byte that isn't already 0xFF never carries into
+        // the next byte, so widths 32 and 64 coincidentally produce the
+        // *same* block 1 (only the last byte changes for either width) --
+        // divergence is not automatic past block 0 for every IV, only
+        // once a real carry crosses the boundary.
+        let iv = [0xFFu8; BLOCK_SIZE];
+        let msg = [0u8; 2 * BLOCK_SIZE];
+
+        let ct32 = one_shot(ctr_width_session(iv, CtrWidth::W32), &msg);
+        let ct64 = one_shot(ctr_width_session(iv, CtrWidth::W64), &msg);
+        let ct128 = one_shot(ctr_width_session(iv, CtrWidth::W128), &msg);
+
+        // Block 0 (bytes 0..16): identical across all three widths.
+        assert_eq!(&ct32[..BLOCK_SIZE], &ct64[..BLOCK_SIZE]);
+        assert_eq!(&ct64[..BLOCK_SIZE], &ct128[..BLOCK_SIZE]);
+
+        // Block 1 (bytes 16..32): pairwise distinct.
+        let b1_32 = &ct32[BLOCK_SIZE..];
+        let b1_64 = &ct64[BLOCK_SIZE..];
+        let b1_128 = &ct128[BLOCK_SIZE..];
+        assert_ne!(b1_32, b1_64, "width 32 vs 64 must diverge at block 1");
+        assert_ne!(b1_64, b1_128, "width 64 vs 128 must diverge at block 1");
+        assert_ne!(b1_32, b1_128, "width 32 vs 128 must diverge at block 1");
+
+        // And each still matches its own hand-computed expectation.
+        assert_eq!(b1_32, expected_ctr_keystream(iv, CtrWidth::W32, 1));
+        assert_eq!(b1_64, expected_ctr_keystream(iv, CtrWidth::W64, 1));
+        assert_eq!(b1_128, expected_ctr_keystream(iv, CtrWidth::W128, 1));
+    }
+
+    #[test]
+    fn ctr_width_32_last_legitimate_block_still_succeeds() {
+        let iv = [0u8; BLOCK_SIZE];
+        let mut session = ctr_width_session(iv, CtrWidth::W32);
+        // 2^32 - 2 blocks already "consumed" -> exactly one legitimate
+        // block remains (block index 2^32 - 2 itself).
+        session.seek_ctr_blocks_for_test((1u64 << 32) - 2);
+        let out = session
+            .close_out(&[0u8; BLOCK_SIZE])
+            .expect("exactly the last legitimate block must succeed");
+        assert_eq!(out.len(), BLOCK_SIZE);
+    }
+
+    #[test]
+    fn ctr_width_32_one_shot_request_exceeding_remaining_blocks_is_exhausted_not_panicking() {
+        let iv = [0u8; BLOCK_SIZE];
+        let mut session = ctr_width_session(iv, CtrWidth::W32);
+        // 1 block remains after the seek; requesting 2 in one call
+        // exceeds it.
+        session.seek_ctr_blocks_for_test((1u64 << 32) - 2);
+        let err = session
+            .close_out(&[0u8; 2 * BLOCK_SIZE])
+            .expect_err("2 blocks > 1 remaining must error, never panic");
+        assert_eq!(err, EngineError::KeystreamExhausted { width: 32 });
+        assert_eq!(
+            err.to_string(),
+            "CTR keystream exhausted: ctr_width=32 supports at most 2**32 - 1 blocks per stream"
+        );
+    }
+
+    #[test]
+    fn ctr_width_32_exhaustion_reachable_mid_session_across_ingest_calls() {
+        let iv = [0u8; BLOCK_SIZE];
+        let mut session = ctr_width_session(iv, CtrWidth::W32);
+        session.seek_ctr_blocks_for_test((1u64 << 32) - 2); // 1 block remains
+
+        let first = session
+            .ingest(&[0u8; BLOCK_SIZE])
+            .expect("first block is within budget");
+        assert_eq!(first.len(), BLOCK_SIZE);
+
+        // 0 blocks remain now -- a second call, not the same one-shot
+        // request, must also error rather than panic.
+        let err = session
+            .close_out(&[0u8; BLOCK_SIZE])
+            .expect_err("0 remaining, mid-session");
+        assert_eq!(err, EngineError::KeystreamExhausted { width: 32 });
+    }
+
+    #[test]
+    fn ctr_exhausted_close_out_still_finalizes_the_session() {
+        // close_out's documented contract ("close-out consumes the session
+        // even when it fails") must hold for this new failure mode too --
+        // not just for the padding/alignment failures it already covered.
+        let iv = [0u8; BLOCK_SIZE];
+        let mut session = ctr_width_session(iv, CtrWidth::W32);
+        session.seek_ctr_blocks_for_test((1u64 << 32) - 2);
+        session
+            .close_out(&[0u8; 2 * BLOCK_SIZE])
+            .expect_err("2 blocks > 1 remaining");
+
+        let err = session
+            .ingest(b"more")
+            .expect_err("the session must be finalized despite the exhaustion error");
+        assert_eq!(err, EngineError::SessionFinalized);
+    }
+
+    #[test]
+    fn ctr_width_32_direct_ingest_exhaustion_finalizes_the_session() {
+        // M2 regression: exhaustion reached via a direct `ingest` call --
+        // not `close_out`, e.g. as `TwofishSession::update` calls it --
+        // must finalize the session at the same single site `close_out`'s
+        // own force-finalize covers, not leave it `Streaming`.
+        let iv = [0u8; BLOCK_SIZE];
+        let mut session = ctr_width_session(iv, CtrWidth::W32);
+        session.seek_ctr_blocks_for_test((1u64 << 32) - 2); // 1 block remains
+
+        session
+            .ingest(&[0u8; BLOCK_SIZE])
+            .expect("first block is within budget"); // 0 blocks remain now
+
+        let err = session
+            .ingest(&[0u8; BLOCK_SIZE])
+            .expect_err("0 remaining blocks must error, via a direct ingest call");
+        assert_eq!(err, EngineError::KeystreamExhausted { width: 32 });
+
+        assert_eq!(
+            session.state_label(),
+            "finalized",
+            "a failed direct ingest (e.g. via TwofishSession::update) must finalize the session"
+        );
+    }
+
+    #[test]
+    fn ctr_width_32_close_out_after_direct_ingest_exhaustion_is_rejected_not_silently_successful() {
+        // The bug this pins: before the fix, a failed direct `ingest` (as
+        // `TwofishSession::update` calls it) left the session `Streaming`,
+        // so a subsequent `close_out`/`finalize()` needing 0 further
+        // keystream blocks succeeded cleanly -- silently masking that the
+        // failed chunk was never processed. It must now raise the ordinary
+        // already-finalized error instead.
+        let iv = [0u8; BLOCK_SIZE];
+        let mut session = ctr_width_session(iv, CtrWidth::W32);
+        session.seek_ctr_blocks_for_test((1u64 << 32) - 2);
+        session
+            .ingest(&[0u8; BLOCK_SIZE])
+            .expect("first block is within budget");
+        session
+            .ingest(&[0u8; BLOCK_SIZE])
+            .expect_err("0 remaining blocks must error");
+
+        let err = session
+            .close_out(b"")
+            .expect_err("session must already be finalized, not silently successful");
+        assert_eq!(err, EngineError::SessionFinalized);
+    }
+
+    #[test]
+    fn ctr_width_128_exhaustion_is_practically_unreachable() {
+        // Same relative-counter position that exhausts width 32 leaves
+        // width 128's budget (2**128 - 1 blocks) completely untouched --
+        // matching the RFC's "width 128 keeps it unreachable, so today's
+        // behavior is unchanged" claim.
+        let iv = [0u8; BLOCK_SIZE];
+        let mut session = ctr_width_session(iv, CtrWidth::W128);
+        session.seek_ctr_blocks_for_test((1u64 << 32) - 2);
+        let out = session
+            .close_out(&[0u8; BLOCK_SIZE])
+            .expect("width 128 has no reachable bound here");
+        assert_eq!(out.len(), BLOCK_SIZE);
+    }
+
+    #[test]
+    fn ctr_width_128_matches_the_pre_rfc_0003_default_byte_for_byte() {
+        // Regression pin: ctr_width=128 (the default) must reproduce
+        // exactly the same output as the un-widthed CTR path this
+        // replaces -- `ctr_encrypt_session()`/`reference_ctr` predate this
+        // slice entirely.
+        let msg: Vec<u8> = (0u8..77).collect();
+        let via_default_helper = one_shot(ctr_encrypt_session(), &msg);
+        let via_explicit_width = one_shot(ctr_width_session(IV, CtrWidth::W128), &msg);
+        assert_eq!(via_default_helper, via_explicit_width);
+        assert_eq!(via_default_helper, reference_ctr(&KEY, IV, &msg));
     }
 }

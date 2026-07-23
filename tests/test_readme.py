@@ -52,11 +52,12 @@ README_PATH = Path(__file__).parent.parent / "README.md"
 
 _PYTHON_FENCE_RE = re.compile(r"```python\n(.*?)```", re.DOTALL)
 
-# Snapshot count (RFC: "7 python fences at last count"). Asserted below so a
+# Snapshot count (RFC 0003 slice 5: "10 python fences at last count" -- the
+# "Modes" section's `ctr_width` paragraph added one). Asserted below so a
 # future fence add/remove in README.md fails loudly here instead of the
 # per-fence parametrization silently growing/shrinking without anyone
 # noticing this harness needs a look.
-_EXPECTED_FENCE_COUNT = 7
+_EXPECTED_FENCE_COUNT = 10
 
 
 def _extract_python_fences(readme_text: str) -> list[str]:
@@ -127,6 +128,17 @@ def test_fence_executes(fence_index: int) -> None:
 # same IV a paired `encrypt`/`encryptor` call used is not reuse (it's
 # recovering that same operation's plaintext), so wrapping them would
 # produce false positives on every legitimate decrypt example.
+#
+# The XTS fence (RFC 0003 slice 4, "XTS (disk-volume encryption)") is
+# exempt from this guard by construction, not by an explicit carve-out:
+# `TwofishXTS.encrypt`/`.decrypt` never call `TwofishKey._encrypt_raw`/
+# `_encryptor_raw` -- the two methods wrapped below -- so nothing in that
+# fence is ever intercepted here. This is intentional and documented (not
+# an oversight the harness "should" catch): XTS has no IV and takes a
+# `tweak` instead, which is a data-unit *position* that is correct to
+# reuse (RFC §2, "the tweak is a position, not a nonce") -- the opposite
+# of the IV-reuse rule this guard exists to enforce, so the guard rightly
+# has nothing to say about that fence.
 
 
 def _record_iv_use(seen: set[tuple[int, bytes]], key: TwofishKey, iv: bytes, label: str) -> None:
@@ -156,16 +168,25 @@ def _guard_iv_reuse(monkeypatch: pytest.MonkeyPatch) -> set[tuple[int, bytes]]:
     original_encryptor_raw = TwofishKey._encryptor_raw
 
     def guarded_encrypt_raw(
-        self: TwofishKey, data: bytes, mode: str, iv: bytes | None, padding: str | None
+        self: TwofishKey,
+        data: bytes,
+        mode: str,
+        iv: bytes | None,
+        padding: str | None,
+        ctr_width: int | None,
     ) -> tuple[bytes, bytes]:
-        used_iv, ciphertext = original_encrypt_raw(self, data, mode, iv, padding)
+        used_iv, ciphertext = original_encrypt_raw(self, data, mode, iv, padding, ctr_width)
         _record_iv_use(seen, self, used_iv, f"encrypt(mode={mode!r})")
         return used_iv, ciphertext
 
     def guarded_encryptor_raw(
-        self: TwofishKey, mode: str, iv: bytes | None, padding: str | None
+        self: TwofishKey,
+        mode: str,
+        iv: bytes | None,
+        padding: str | None,
+        ctr_width: int | None,
     ) -> TwofishSession:
-        session = original_encryptor_raw(self, mode, iv, padding)
+        session = original_encryptor_raw(self, mode, iv, padding, ctr_width)
         _record_iv_use(seen, self, session.iv, f"encryptor(mode={mode!r})")
         return session
 

@@ -8,6 +8,14 @@ its one-shot `encrypt`/`decrypt` (the dominant case) or open a streaming
 chunk buffering are handled internally — there is no separate `pad()`/
 `unpad()` step and no manual block-alignment bookkeeping.
 
+**Which construct do I need?** If you have Twofish-encrypted data from
+KeePass/KDBX, OpenPGP, or a dm-crypt `twofish-cbc-essiv:sha256` volume —
+`TwofishKey` (below). If you have a VeraCrypt volume, a TrueCrypt volume
+(5.0 or later), or a dm-crypt/LUKS `twofish-xts-plain64` volume —
+[`TwofishXTS`](#xts-disk-volume-encryption). If you're migrating off the
+dead PyPI `twofish` package — see
+["Migrating from the `twofish` package"](#migrating-from-the-twofish-package).
+
 ## Installation
 
 ```bash
@@ -72,7 +80,28 @@ iv, ciphertext = key.encrypt(plaintext, Mode.CTR)
 ```
 
 For `CTR`, `iv` is the full 16-byte initial counter block (big-endian
-128-bit increment), not a nonce+counter split.
+128-bit increment), not a nonce+counter split — unless you pass
+`ctr_width`, which selects a narrower, NIST-style nonce||counter split:
+only the low `ctr_width` bits of `iv` increment, matching legacy formats
+built on PyCryptodome-style `Counter(nonce=..., initial_value=...)`
+layouts (the dead `twofish` package's own users' homegrown CTR):
+
+```python
+nonce8 = bytes(range(8))
+iv3 = nonce8 + (0).to_bytes(8, "big")  # 8-byte nonce || 8-byte BE counter
+ciphertext64 = key.encrypt(aligned_data, Mode.CTR, iv=iv3, ctr_width=64)
+key.decrypt(ciphertext64, Mode.CTR, iv=iv3, ctr_width=64)
+```
+
+`ctr_width` defaults to 128 (today's behavior: the whole IV is the
+counter) and must be 32, 64, or 128; passing it for any mode other than
+`CTR` raises `ValueError`. The low `ctr_width` bits wrap through zero as
+they increment — that's expected, matching every real split-counter
+format — but a single stream (one-shot, or summed across a session's
+`update()` calls) is limited to `2**ctr_width - 1` blocks; asking for more
+raises `ValueError` rather than silently reusing keystream. At
+`ctr_width=128` that limit is unreachable by any real payload, so default
+behavior is unchanged.
 
 **Never reuse an `iv` under the same key.** For `CTR` and `OFB` this is
 catastrophic: the keystream repeats, and XORing the two ciphertexts
@@ -148,12 +177,96 @@ not payload size; keeping ECB use to single blocks is on the caller.
 Restrict actual use to single blocks (e.g. known-answer tests) or
 explicit interop.
 
+### XTS (disk-volume encryption)
+
+`TwofishXTS` is a structurally separate construct from everything above —
+not reachable via `Mode` — for VeraCrypt, TrueCrypt (5.0 or later), and
+dm-crypt/LUKS `twofish-xts-plain64` volumes. It takes one concatenated
+double-length key instead of a single key, a per-call `tweak` (the
+data-unit/sector number) instead of an IV, and no padding parameter —
+ciphertext stealing handles data units that aren't a multiple of 16 bytes,
+so `len(ciphertext) == len(data)` always. It is one-shot only: XTS is
+random-access by construction (every data unit is encrypted/decrypted
+independently), so there is no streaming session.
+
+```python
+from oxifish import TwofishXTS
+
+# One concatenated key: the first half drives the data cipher, the second
+# half drives the tweak (IEEE 1619's Key1 || Key2 order) -- e.g. VeraCrypt's
+# volume-header "master keydata" field is exactly this shape. The two
+# halves must differ; each half is independently 16, 24, or 32 bytes.
+xts_key = bytes(range(32)) + bytes(range(32, 64))
+xts = TwofishXTS(xts_key)
+
+sector = bytes(512)  # VeraCrypt's data unit is always 512 bytes,
+                      # regardless of the drive's physical sector size
+byte_offset = 512 * 42
+data_unit = byte_offset // 512  # NOT the OS's reported sector number
+
+ciphertext = xts.encrypt(sector, tweak=data_unit)
+plaintext = xts.decrypt(ciphertext, tweak=data_unit)
+```
+
+**The `tweak` is a position, not a nonce.** Unlike every IV-taking mode
+above, reusing the same `tweak` to re-encrypt the same data unit is
+*correct* — that's what a tweakable mode is for. The misuse case is the
+*wrong* tweak for a position (silent garbage plaintext, no error), not a
+repeated one. Do not carry the "never reuse an IV" rule from the rest of
+this README over to `tweak=`; the fence above has no IV and is
+intentionally exempt from that rule.
+
+### Migrating from the `twofish` package
+
+The PyPI [`twofish`](https://pypi.org/project/twofish/) package is
+archived upstream and broken on Python 3.12+. Its entire API was
+single-block `encrypt`/`decrypt` — callers built their own modes on top
+of it. The migration target is the same bare block primitive shown
+above: `ecb_encryptor`/`ecb_decryptor` with `Padding.NONE`. Composing
+modes yourself on top of a raw block primitive is almost always a
+mistake (that's why this library hides one behind `Mode`/`encrypt`
+instead); this construct exists for known-answer tests and mechanical
+migration, not for new designs.
+
+```python
+from oxifish import Padding
+
+# One block (the KAT / known-answer shape -- what `twofish.encrypt()` did):
+block_in = bytes(range(16))  # exactly one block
+block_out = key.ecb_encryptor(padding=Padding.NONE).finalize(block_in)
+
+# Many blocks (the real migration shape): ONE session, reused.
+# ECB no-padding sessions flush eagerly -- update() returns each block
+# immediately -- so a fresh session per block works but wastes a
+# construction + FFI crossing per call.
+migration_blocks = [bytes([i]) * 16 for i in range(4)]
+enc_session = key.ecb_encryptor(padding=Padding.NONE)
+migrated_ciphertext = (
+    b"".join(enc_session.update(b) for b in migration_blocks) + enc_session.finalize()
+)
+
+# Decrypt direction: the same one-session-reused shape.
+dec_session = key.ecb_decryptor(padding=Padding.NONE)
+migrated_plaintext = (
+    b"".join(
+        dec_session.update(migrated_ciphertext[i : i + 16])
+        for i in range(0, len(migrated_ciphertext), 16)
+    )
+    + dec_session.finalize()
+)
+```
+
 ## Errors
 
 - `ValueError` — invalid key/IV length, an unrecognized `mode`/`padding`
   string (including `"ecb"`, which is reachable only via the `ecb_*`
-  factories), a misaligned data length when `padding=Padding.NONE`, or an
-  explicit `padding` on a stream mode.
+  factories), a misaligned data length when `padding=Padding.NONE`, an
+  explicit `padding` on a stream mode, an invalid `ctr_width` (must be 32,
+  64, or 128) or `ctr_width` on a non-`CTR` mode, or CTR keystream
+  exhaustion (`2**ctr_width - 1` blocks per stream — unreachable at the
+  default `ctr_width=128`). For `TwofishXTS`: a key length outside
+  {32, 48, 64} bytes, equal key halves, a data unit outside 16 bytes to
+  16 MiB, or a `tweak` outside `0 <= tweak < 2**128`.
 - `DecryptionError` (a `ValueError` subclass) — invalid or corrupted
   padded ciphertext. One fixed message closes the error-string side
   channel; this is **not** a constant-time guarantee (Twofish's
